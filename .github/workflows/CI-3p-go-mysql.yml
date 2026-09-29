@@ -1,0 +1,59 @@
+# New suite (no sysown/proxysql v3.0 caller): same shape as the generated CI-3p-aiomysql.yml.
+# The job logic lives in sysown/proxysql/.github/workflows/ci-3p-go-mysql.yml@GH-Actions.
+name: CI-3p-go-mysql
+run-name: '${{ github.workflow }} ${{ inputs.branch }} ${{ inputs.sha }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'sysown/proxysql commit to test (its CI-builds handoff artifact must still exist, retention 1 day)'
+        required: true
+        type: string
+      branch:
+        description: 'sysown/proxysql branch of the commit'
+        default: 'v3.0'
+        type: string
+      build_run_id:
+        description: 'sysown/proxysql CI-builds run id (optional, speeds up the artifact lookup)'
+        default: ''
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.sha }}
+  cancel-in-progress: false
+
+# reusable workflows run with the caller's token permissions: read the repository, manage the run's
+# artifacts (ci-3p-sqlalchemy removes its per-leg summary artifacts)
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  run-mysql:
+    uses: sysown/proxysql/.github/workflows/ci-3p-go-mysql.yml@GH-Actions
+    # 'secrets: inherit' does not cross organizations: pass the secrets the reusable workflow declares
+    secrets:
+      PROXYSQL_3P_TESTING_DEPLOY_KEY: ${{ secrets.PROXYSQL_3P_TESTING_DEPLOY_KEY }}
+      PROXYSQL_ARTIFACTS_TOKEN: ${{ secrets.PROXYSQL_ARTIFACTS_TOKEN }}
+    with:
+      infradb: ${{ vars.MATRIX_3P_GO_MYSQL_INFRADB_MYSQL }}
+      connector: ${{ vars.MATRIX_3P_GO_MYSQL_CONNECTOR_MYSQL }}
+      proxysql_repo: 'sysown/proxysql'
+      sha: ${{ inputs.sha }}
+      branch: ${{ inputs.branch }}
+      build_run_id: ${{ inputs.build_run_id }}
+
+  run-mariadb:
+    uses: sysown/proxysql/.github/workflows/ci-3p-go-mysql.yml@GH-Actions
+    # 'secrets: inherit' does not cross organizations: pass the secrets the reusable workflow declares
+    secrets:
+      PROXYSQL_3P_TESTING_DEPLOY_KEY: ${{ secrets.PROXYSQL_3P_TESTING_DEPLOY_KEY }}
+      PROXYSQL_ARTIFACTS_TOKEN: ${{ secrets.PROXYSQL_ARTIFACTS_TOKEN }}
+    with:
+      infradb: ${{ vars.MATRIX_3P_GO_MYSQL_INFRADB_MARIADB }}
+      connector: ${{ vars.MATRIX_3P_GO_MYSQL_CONNECTOR_MARIADB }}
+      proxysql_repo: 'sysown/proxysql'
+      sha: ${{ inputs.sha }}
+      branch: ${{ inputs.branch }}
+      build_run_id: ${{ inputs.build_run_id }}

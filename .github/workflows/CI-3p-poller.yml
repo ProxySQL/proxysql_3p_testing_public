@@ -1,0 +1,73 @@
+# Starts the 3rd-party suites for new sysown/proxysql builds.
+#
+# Cross-repository workflow_run events do not exist, so this repository polls: for each tracked
+# sysown/proxysql branch it takes the latest successful CI-builds run, checks that its v4.0-tier
+# handoff artifact still exists (retention 1 day), and dispatches every *enabled* CI-3p-* wrapper that
+# has not run for that commit yet. A wrapper counts as done for a commit when one of its runs has the
+# title '<workflow> <branch> <sha>' (its run-name). Enable/disable a suite by enabling/disabling its
+# workflow in this repository.
+name: CI-3p-poller
+
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: CI-3p-poller
+  cancel-in-progress: false
+
+permissions:
+  actions: write   # list this repository's workflows/runs and dispatch the wrappers
+  contents: read
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - name: Dispatch enabled suites for new builds
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PROXYSQL_REPO: 'sysown/proxysql'
+        BRANCHES: ${{ vars.CI_3P_BRANCHES || 'v3.0' }}
+        HANDOFF_VARIANT: 'ubuntu24-tap-genai-gcov'
+      run: |
+        set -euo pipefail
+
+        mapfile -t WORKFLOWS < <(gh api "repos/${REPO}/actions/workflows?per_page=100" --jq '
+          .workflows[] | select(.state == "active") | .path | split("/") | last
+          | select(test("^CI-3p-.+\\.yml$") and . != "CI-3p-poller.yml")')
+        echo "enabled suites: ${WORKFLOWS[*]:-none}"
+        [[ ${#WORKFLOWS[@]} -gt 0 ]] || exit 0
+
+        for BRANCH in ${BRANCHES}; do
+          if ! [[ "${BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "invalid branch name '${BRANCH}' in CI_3P_BRANCHES, skipping"; continue
+          fi
+          RUN_ID='' SHA=''
+          # CI-builds is started by workflow_run, so GitHub files every run under the default branch and its
+          # head commit, pull request builds included. The built branch and commit are only in the run
+          # title (run-name '<branch> CI-builds <sha>'): select on it and take the commit from it.
+          read -r RUN_ID SHA < <(gh api "repos/${PROXYSQL_REPO}/actions/workflows/CI-builds.yml/runs?status=success&per_page=100" \
+                                   --jq "[.workflow_runs[] | select(.display_title | test(\"^${BRANCH//./\\\\.} CI-builds [0-9a-f]{40}$\"))][0]
+                                         | \"\\(.id) \\(.display_title | split(\" \") | last)\"") || true
+          if ! [[ "${SHA}" =~ ^[0-9a-f]{40}$ && "${RUN_ID}" =~ ^[0-9]+$ ]]; then
+            echo "${BRANCH}: no successful CI-builds run"; continue
+          fi
+          ARTIFACT="ci-builds-handoff-${SHA}-${HANDOFF_VARIANT}-full"
+          if [[ -z "$(gh api "repos/${PROXYSQL_REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" \
+                        --jq ".artifacts[] | select(.name == \"${ARTIFACT}\" and .expired == false) | .id")" ]]; then
+            echo "${BRANCH} ${SHA}: handoff artifact missing or expired (CI-builds run ${RUN_ID}), skipping"; continue
+          fi
+          for WF in "${WORKFLOWS[@]}"; do
+            TITLE="${WF%.yml} ${BRANCH} ${SHA}"
+            if gh api "repos/${REPO}/actions/workflows/${WF}/runs?per_page=100" --jq '.workflow_runs[].display_title' | grep -qxF "${TITLE}"; then
+              echo "${TITLE}: already run"
+              continue
+            fi
+            echo "${TITLE}: dispatching (CI-builds run ${RUN_ID})"
+            gh workflow run "${WF}" -R "${REPO}" -f sha="${SHA}" -f branch="${BRANCH}" -f build_run_id="${RUN_ID}"
+          done
+        done

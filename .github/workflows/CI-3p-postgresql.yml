@@ -32,7 +32,10 @@ permissions:
 jobs:
   run-pgsql:
     uses: sysown/proxysql/.github/workflows/ci-3p-postgresql.yml@ci/3p-callable-cross-org
-    secrets: inherit
+    # 'secrets: inherit' does not cross organizations: pass the secrets the reusable workflow declares
+    secrets:
+      PROXYSQL_3P_TESTING_DEPLOY_KEY: ${{ secrets.PROXYSQL_3P_TESTING_DEPLOY_KEY }}
+      PROXYSQL_ARTIFACTS_TOKEN: ${{ secrets.PROXYSQL_ARTIFACTS_TOKEN }}
     with:
       infradb: ${{ vars.MATRIX_3P_POSTGRESQL_INFRADB_PGSQL }}
       connector: ${{ vars.MATRIX_3P_POSTGRESQL_CONNECTOR_PGSQL }}

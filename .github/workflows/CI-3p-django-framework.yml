@@ -32,7 +32,10 @@ permissions:
 jobs:
   run-mysql:
     uses: sysown/proxysql/.github/workflows/ci-3p-django-framework.yml@ci/3p-callable-cross-org
-    secrets: inherit
+    # 'secrets: inherit' does not cross organizations: pass the secrets the reusable workflow declares
+    secrets:
+      PROXYSQL_3P_TESTING_DEPLOY_KEY: ${{ secrets.PROXYSQL_3P_TESTING_DEPLOY_KEY }}
+      PROXYSQL_ARTIFACTS_TOKEN: ${{ secrets.PROXYSQL_ARTIFACTS_TOKEN }}
     with:
       infradb: ${{ vars.MATRIX_3P_DJANGO_FRAMEWORK_INFRADB_MYSQL }}
       connector: ${{ vars.MATRIX_3P_DJANGO_FRAMEWORK_CONNECTOR_MYSQL }}
@@ -43,7 +46,10 @@ jobs:
 
   run-mariadb:
     uses: sysown/proxysql/.github/workflows/ci-3p-django-framework.yml@ci/3p-callable-cross-org
-    secrets: inherit
+    # 'secrets: inherit' does not cross organizations: pass the secrets the reusable workflow declares
+    secrets:
+      PROXYSQL_3P_TESTING_DEPLOY_KEY: ${{ secrets.PROXYSQL_3P_TESTING_DEPLOY_KEY }}
+      PROXYSQL_ARTIFACTS_TOKEN: ${{ secrets.PROXYSQL_ARTIFACTS_TOKEN }}
     with:
       infradb: ${{ vars.MATRIX_3P_DJANGO_FRAMEWORK_INFRADB_MARIADB }}
       connector: ${{ vars.MATRIX_3P_DJANGO_FRAMEWORK_CONNECTOR_MARIADB }}
@@ -54,7 +60,10 @@ jobs:
 
   run-pgsql:
     uses: sysown/proxysql/.github/workflows/ci-3p-django-framework.yml@ci/3p-callable-cross-org
-    secrets: inherit
+    # 'secrets: inherit' does not cross organizations: pass the secrets the reusable workflow declares
+    secrets:
+      PROXYSQL_3P_TESTING_DEPLOY_KEY: ${{ secrets.PROXYSQL_3P_TESTING_DEPLOY_KEY }}
+      PROXYSQL_ARTIFACTS_TOKEN: ${{ secrets.PROXYSQL_ARTIFACTS_TOKEN }}
     with:
       infradb: ${{ vars.MATRIX_3P_DJANGO_FRAMEWORK_INFRADB_PGSQL }}
       connector: ${{ vars.MATRIX_3P_DJANGO_FRAMEWORK_CONNECTOR_PGSQL }}

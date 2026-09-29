@@ -1,0 +1,42 @@
+# Generated from the sysown/proxysql v3.0 caller CI-3p-php-pdo-pgsql.yml.
+# The job logic lives in sysown/proxysql/.github/workflows/ci-3p-php-pdo-pgsql.yml@ci/3p-callable-cross-org.
+name: CI-3p-php-pdo-pgsql
+run-name: '${{ github.workflow }} ${{ inputs.branch }} ${{ inputs.sha }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'sysown/proxysql commit to test (its CI-builds handoff artifact must still exist, retention 1 day)'
+        required: true
+        type: string
+      branch:
+        description: 'sysown/proxysql branch of the commit'
+        default: 'v3.0'
+        type: string
+      build_run_id:
+        description: 'sysown/proxysql CI-builds run id (optional, speeds up the artifact lookup)'
+        default: ''
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.sha }}
+  cancel-in-progress: false
+
+# reusable workflows run with the caller's token permissions: read the repository, manage the run's
+# artifacts (ci-3p-sqlalchemy removes its per-leg summary artifacts)
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  run-pgsql:
+    uses: sysown/proxysql/.github/workflows/ci-3p-php-pdo-pgsql.yml@ci/3p-callable-cross-org
+    secrets: inherit
+    with:
+      infradb: ${{ vars.MATRIX_3P_PHP_PDO_PGSQL_INFRADB_PGSQL }}
+      connector: ${{ vars.MATRIX_3P_PHP_PDO_PGSQL_CONNECTOR_PGSQL }}
+      proxysql_repo: 'sysown/proxysql'
+      sha: ${{ inputs.sha }}
+      branch: ${{ inputs.branch }}
+      build_run_id: ${{ inputs.build_run_id }}

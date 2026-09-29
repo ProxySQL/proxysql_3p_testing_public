@@ -1,5 +1,5 @@
 # Generated from the sysown/proxysql v3.0 caller CI-3p-mariadb-connector-c.yml.
-# The job logic lives in sysown/proxysql/.github/workflows/ci-3p-mariadb-connector-c.yml@ci/3p-callable-cross-org.
+# The job logic lives in sysown/proxysql/.github/workflows/ci-3p-mariadb-connector-c.yml@GH-Actions.
 name: CI-3p-mariadb-connector-c
 run-name: '${{ github.workflow }} ${{ inputs.branch }} ${{ inputs.sha }}'
 
@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   run-mysql:
-    uses: sysown/proxysql/.github/workflows/ci-3p-mariadb-connector-c.yml@ci/3p-callable-cross-org
+    uses: sysown/proxysql/.github/workflows/ci-3p-mariadb-connector-c.yml@GH-Actions
     # 'secrets: inherit' does not cross organizations: pass the secrets the reusable workflow declares
     secrets:
       PROXYSQL_3P_TESTING_DEPLOY_KEY: ${{ secrets.PROXYSQL_3P_TESTING_DEPLOY_KEY }}
@@ -45,7 +45,7 @@ jobs:
       build_run_id: ${{ inputs.build_run_id }}
 
   run-mariadb:
-    uses: sysown/proxysql/.github/workflows/ci-3p-mariadb-connector-c.yml@ci/3p-callable-cross-org
+    uses: sysown/proxysql/.github/workflows/ci-3p-mariadb-connector-c.yml@GH-Actions
     # 'secrets: inherit' does not cross organizations: pass the secrets the reusable workflow declares
     secrets:
       PROXYSQL_3P_TESTING_DEPLOY_KEY: ${{ secrets.PROXYSQL_3P_TESTING_DEPLOY_KEY }}

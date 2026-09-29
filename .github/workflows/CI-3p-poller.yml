@@ -42,6 +42,9 @@ jobs:
         echo "enabled suites: ${WORKFLOWS[*]:-none}"
         [[ ${#WORKFLOWS[@]} -gt 0 ]] || exit 0
 
+        # handoff artifacts live 1 day: only look at recent builds, and pick the newest explicitly
+        # (the runs API ordering differed between tokens: the workflow token got an August run first)
+        SINCE=$(date -u -d '2 days ago' +%Y-%m-%d)
         for BRANCH in ${BRANCHES}; do
           if ! [[ "${BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]]; then
             echo "invalid branch name '${BRANCH}' in CI_3P_BRANCHES, skipping"; continue
@@ -50,8 +53,8 @@ jobs:
           # CI-builds is started by workflow_run, so GitHub files every run under the default branch and its
           # head commit, pull request builds included. The built branch and commit are only in the run
           # title (run-name '<branch> CI-builds <sha>'): select on it and take the commit from it.
-          read -r RUN_ID SHA < <(gh api "repos/${PROXYSQL_REPO}/actions/workflows/CI-builds.yml/runs?status=success&per_page=100" \
-                                   --jq "[.workflow_runs[] | select(.display_title | test(\"^${BRANCH//./\\\\.} CI-builds [0-9a-f]{40}$\"))][0]
+          read -r RUN_ID SHA < <(gh api "repos/${PROXYSQL_REPO}/actions/workflows/CI-builds.yml/runs?status=success&created=>=${SINCE}&per_page=100" \
+                                   --jq "[.workflow_runs[] | select(.display_title | test(\"^${BRANCH//./\\\\.} CI-builds [0-9a-f]{40}$\"))] | max_by(.created_at)
                                          | \"\\(.id) \\(.display_title | split(\" \") | last)\"") || true
           if ! [[ "${SHA}" =~ ^[0-9a-f]{40}$ && "${RUN_ID}" =~ ^[0-9]+$ ]]; then
             echo "${BRANCH}: no successful CI-builds run"; continue

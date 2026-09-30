@@ -1,0 +1,101 @@
+# Builds ProxySQL v4.0 (the v40 tier: PROXYSQL40=1, gcov instrumented, ubuntu24 debug) from
+# sysown/proxysql at one commit, on this organization's GitHub-hosted runners, and publishes what the
+# 3rd-party suites need as an artifact of the calling run: src/proxysql and the gcov notes (*.gcno).
+# The suites check out the same commit themselves (sources for gcov, 'git describe' for the harness).
+name: 3p-build
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: 'sysown/proxysql commit to build'
+        required: true
+        type: string
+    outputs:
+      artifact:
+        description: 'name of the build artifact in this run'
+        value: ${{ jobs.build.outputs.artifact }}
+      version:
+        description: 'proxysql --version of the build'
+        value: ${{ jobs.build.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (v4.0, ${{ inputs.sha }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    outputs:
+      artifact: ${{ steps.pack.outputs.artifact }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        df -h /
+
+    - name: Checkout proxysql
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        repository: sysown/proxysql
+        ref: ${{ inputs.sha }}
+        # full history and tags: the version (GITVERSION) comes from 'git describe'
+        fetch-depth: 0
+        path: proxysql
+        persist-credentials: false
+
+    - name: Build v4.0 (PROXYSQL40=1 WITHGCOV=1 make ubuntu24-dbg)
+      timeout-minutes: 170
+      working-directory: proxysql
+      run: |
+        set -o pipefail
+        git fetch --tags --force
+        # the ubuntu24 build container gets PROXYSQL40/WITHGCOV through docker-compose.yml's environment
+        # block; PROXYSQL40=1 cascades PROXYSQL31/FFTO/TSDB and the 4.0 GITVERSION (Makefile)
+        PROXYSQL40=1 WITHGCOV=1 make ubuntu24-dbg 2>&1 | tee build.log
+        grep -q 'exited with code 0' build.log
+
+    - name: Check the binary is the v4.0 build of this commit
+      id: check
+      working-directory: proxysql
+      run: |
+        set -eo pipefail
+        ls -l src/proxysql
+        VERSION=$(docker run --rm -v "$PWD/src/proxysql:/usr/bin/proxysql:ro" ubuntu:24.04 bash -c \
+          'apt-get -qq update >/dev/null && apt-get -qq install -y libgnutls30t64 libuuid1 >/dev/null && proxysql --version' 2>&1 | grep -m1 -oP 'ProxySQL version \K\S+')
+        echo "version: ${VERSION}"
+        [[ ${VERSION} =~ ^4\.0\. ]] || { echo "::error::not a v4.0 build: '${VERSION}'"; exit 1; }
+        SHORT=$(git rev-parse --short=7 HEAD)
+        [[ ${VERSION} =~ -g${SHORT} ]] || { echo "::error::version '${VERSION}' is not commit ${SHORT}"; exit 1; }
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+    - name: Pack the binary and the gcov notes
+      id: pack
+      working-directory: proxysql
+      env:
+        SHA: ${{ inputs.sha }}
+      run: |
+        set -eo pipefail
+        find lib plugins src -name '*.gcno' > ../gcno.list
+        echo "gcov notes: $(wc -l < ../gcno.list)"
+        tar -cf - src/proxysql -T ../gcno.list | zstd -T0 -10 -q -o ../proxysql-v40.tar.zst
+        ls -l ../proxysql-v40.tar.zst
+        echo "artifact=proxysql-v40-${SHA}" >> "$GITHUB_OUTPUT"
+
+    - name: Upload the build
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ${{ steps.pack.outputs.artifact }}
+        path: proxysql-v40.tar.zst
+        compression-level: 0
+        retention-days: 3
+
+    - name: Upload the build log
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: proxysql-v40-${{ inputs.sha }}-build-log
+        path: proxysql/build.log
+        retention-days: 7

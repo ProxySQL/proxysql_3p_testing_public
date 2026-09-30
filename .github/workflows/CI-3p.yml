@@ -1,0 +1,135 @@
+# 3rd-party suites against ProxySQL v4.0, built and tested entirely on this organization's runners:
+#   resolve  the sysown/proxysql commit (branch head, default v3.0, or an explicit sha) and the suites
+#   build    ProxySQL v4.0 at that commit (3p-build.yml: PROXYSQL40=1 WITHGCOV=1 make ubuntu24-dbg)
+#   suites   every suite x instance (mysql / mariadb / pgsql) against that build (3p-suite.yml),
+#            databases and connectors from the MATRIX_3P_<SUITE>_{INFRADB,CONNECTOR}_<INSTANCE> variables
+# Scheduled runs test a commit once: they skip a commit whose build artifact already exists.
+name: CI-3p
+run-name: "CI-3p v4.0 ${{ inputs.branch || 'v3.0' }} ${{ inputs.sha || '(head)' }}${{ inputs.suites && format(' [{0}]', inputs.suites) || '' }}"
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'sysown/proxysql branch whose head is tested (when sha is empty)'
+        default: 'v3.0'
+        type: string
+      sha:
+        description: 'sysown/proxysql commit to test (default: head of branch)'
+        default: ''
+        type: string
+      suites:
+        description: 'optional comma-separated suites (e.g. pgx,psycopg), or suite/instance (e.g. aiomysql/mariadb); default: all'
+        default: ''
+        type: string
+
+# one build+test pipeline at a time: a scheduled run waits instead of building the same commit twice
+concurrency:
+  group: CI-3p
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      run: ${{ steps.resolve.outputs.run }}
+      suites: ${{ steps.resolve.outputs.suites }}
+    steps:
+    - name: Resolve commit and suites
+      id: resolve
+      env:
+        GH_TOKEN: ${{ github.token }}
+        EVENT: ${{ github.event_name }}
+        BRANCH: ${{ inputs.branch || 'v3.0' }}
+        SHA_INPUT: ${{ inputs.sha }}
+        SUITES_INPUT: ${{ inputs.suites }}
+        VARS_JSON: ${{ toJson(vars) }}
+        REPO: ${{ github.repository }}
+      shell: python3 {0}
+      run: |
+        import ast, json, os, re, subprocess, sys
+        def out(key, value):
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as f: f.write(f'{key}={value}\n')
+        def gh(path):
+            return json.loads(subprocess.check_output(['gh', 'api', path], text=True))
+
+        branch, sha = os.environ['BRANCH'], os.environ['SHA_INPUT'].strip()
+        if not sha:
+            if not re.fullmatch(r'[A-Za-z0-9._/-]+', branch): sys.exit(f'invalid branch {branch!r}')
+            sha = gh(f'repos/sysown/proxysql/commits/{branch}')['sha']
+        if not re.fullmatch(r'[0-9a-f]{40}', sha): sys.exit(f'invalid sha {sha!r} (full 40-hex commit expected)')
+        print(f'commit: {sha}')
+        out('sha', sha)
+
+        # a scheduled run tests a commit once
+        run = True
+        if os.environ['EVENT'] == 'schedule':
+            existing = gh(f"repos/{os.environ['REPO']}/actions/artifacts?name=proxysql-v40-{sha}&per_page=5")['artifacts']
+            if any(not a['expired'] for a in existing):
+                print(f'{sha}: already built and tested (artifact proxysql-v40-{sha}), nothing to do')
+                run = False
+        out('run', json.dumps(run))
+
+        # suite -> instances (catalogue rows of sysown/proxysql .github/ci-tier-consumers.json)
+        catalogue = {
+            'aiomysql': ['mysql', 'mariadb'], 'django-framework': ['mysql', 'mariadb', 'pgsql'],
+            'go-mysql': ['mysql', 'mariadb'], 'laravel-framework': ['mysql', 'mariadb', 'pgsql'],
+            'mariadb-connector-c': ['mysql', 'mariadb'], 'mariadb-connector-j': ['mysql', 'mariadb'],
+            'mysql-connector-j': ['mysql', 'mariadb'], 'mysql-connector-python': ['mysql', 'mariadb'],
+            'mysqlclient': ['mysql', 'mariadb'], 'node-mysql2': ['mysql', 'mariadb'], 'node-postgres': ['pgsql'],
+            'pgjdbc': ['pgsql'], 'pgx': ['pgsql'], 'php-mysqli': ['mysql', 'mariadb'],
+            'php-pdo-mysql': ['mysql', 'mariadb'], 'php-pdo-pgsql': ['pgsql'], 'postgresql': ['pgsql'],
+            'psycopg': ['pgsql'], 'pymysql': ['mysql', 'mariadb'], 'sqlalchemy': ['mysql', 'mariadb', 'pgsql'],
+        }
+        wanted = [w.strip() for w in os.environ['SUITES_INPUT'].split(',') if w.strip()]
+        unknown = [w for w in wanted if w.split('/')[0] not in catalogue]
+        if unknown: sys.exit(f'unknown suite(s): {unknown}')
+
+        variables = {k.upper(): v for k, v in json.loads(os.environ['VARS_JSON'] or '{}').items()}
+        def axis(suite, name, instance):
+            key = f"MATRIX_3P_{suite.upper().replace('-', '_')}_{name}_{instance.upper()}"
+            if key not in variables: sys.exit(f'repository variable {key} is not set')
+            values = ast.literal_eval(variables[key])   # the variables are Python/JSON list literals
+            if not isinstance(values, list) or not values: sys.exit(f'{key}: expected a non-empty list')
+            return json.dumps(values)
+
+        suites = []
+        for suite, instances in catalogue.items():
+            for instance in instances:
+                if wanted and suite not in wanted and f'{suite}/{instance}' not in wanted: continue
+                suites.append(dict(suite=suite, instance=instance,
+                    infradb=axis(suite, 'INFRADB', instance), connector=axis(suite, 'CONNECTOR', instance)))
+        print(json.dumps(suites, indent=1))
+        out('suites', json.dumps(suites))
+
+  build:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.run == 'true' }}
+    uses: ./.github/workflows/3p-build.yml
+    with:
+      sha: ${{ needs.resolve.outputs.sha }}
+
+  suites:
+    needs: [resolve, build]
+    name: ${{ matrix.suite }} / ${{ matrix.instance }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.resolve.outputs.suites) }}
+    uses: ./.github/workflows/3p-suite.yml
+    secrets:
+      PROXYSQL_3P_TESTING_DEPLOY_KEY: ${{ secrets.PROXYSQL_3P_TESTING_DEPLOY_KEY }}
+    with:
+      suite: ${{ matrix.suite }}
+      instance: ${{ matrix.instance }}
+      infradb: ${{ matrix.infradb }}
+      connector: ${{ matrix.connector }}
+      sha: ${{ needs.resolve.outputs.sha }}
+      artifact: ${{ needs.build.outputs.artifact }}

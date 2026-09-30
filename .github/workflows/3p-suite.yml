@@ -1,0 +1,197 @@
+# Runs one 3rd-party suite of ProxySQL/proxysql_3p_testing (one instance: its mysql, mariadb or pgsql
+# databases) against the ProxySQL v4.0 build of the calling run (3p-build.yml), one job per
+# infradb x connector. The steps mirror sysown/proxysql's ci-3p-*.yml test job; the product comes from
+# this organization's own build instead of the sysown CI-builds handoff.
+name: 3p-suite
+
+on:
+  workflow_call:
+    inputs:
+      suite:
+        description: 'suite name, the harness directory is test_<suite>'
+        required: true
+        type: string
+      instance:
+        description: 'database family of this call: mysql, mariadb or pgsql'
+        required: true
+        type: string
+      infradb:
+        description: 'JSON array of databases, e.g. ["mysql8.0","mysql8.4"]'
+        required: true
+        type: string
+      connector:
+        description: 'JSON array of connector values (CONNECTOR)'
+        required: true
+        type: string
+      sha:
+        description: 'sysown/proxysql commit of the build'
+        required: true
+        type: string
+      artifact:
+        description: 'build artifact of the calling run (3p-build.yml)'
+        required: true
+        type: string
+      testtree:
+        description: 'proxysql_3p_testing ref'
+        default: main
+        type: string
+    secrets:
+      PROXYSQL_3P_TESTING_DEPLOY_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ inputs.suite }} (v4.0, ${{ matrix.infradb }}, ${{ matrix.connector }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        infradb: ${{ fromJson(inputs.infradb) }}
+        connector: ${{ fromJson(inputs.connector) }}
+    env:
+      TESTNAME: ${{ inputs.suite }}
+      INFRADB: ${{ matrix.infradb }}
+      CONNECTOR: ${{ matrix.connector }}
+      SHA: ${{ inputs.sha }}
+    steps:
+    - name: Checkout proxysql_3p_testing
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        repository: ProxySQL/proxysql_3p_testing
+        ref: ${{ inputs.testtree }}
+        fetch-depth: 1
+        path: proxysql_3p_testing
+        persist-credentials: false
+        ssh-key: ${{ secrets.PROXYSQL_3P_TESTING_DEPLOY_KEY }}
+        sparse-checkout: |
+          common
+          libs
+          test_${{ inputs.suite }}
+
+    - name: Checkout proxysql
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        repository: sysown/proxysql
+        ref: ${{ inputs.sha }}
+        # full (blobless) history so 'git describe' reports the tested version; sources for gcov
+        fetch-depth: 0
+        filter: 'blob:none'
+        path: proxysql
+        persist-credentials: false
+        sparse-checkout: |
+          include
+          lib
+          plugins
+          src
+
+    - name: Download the v4.0 build
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      with:
+        name: ${{ inputs.artifact }}
+
+    - name: Restore the v4.0 build
+      run: |
+        set -eo pipefail
+        zstd -dc proxysql-v40.tar.zst | tar -xf - -C proxysql
+        rm -f proxysql-v40.tar.zst
+        ls -l proxysql/src/proxysql
+        git -C proxysql describe --long --abbrev=7
+
+    - name: Prepare
+      run: |
+        set -eo pipefail
+        cd proxysql_3p_testing/
+        # the submodule(s) of the suite (setup.sh initializes the listed path)
+        case "${TESTNAME}" in
+          django-framework) ./setup.sh "test_${TESTNAME}" ;;
+          php-mysqli|php-pdo-mysql|php-pdo-pgsql) ./setup.sh "test_${TESTNAME}/php-src" ;;
+          pymysql) ./setup.sh "test_${TESTNAME}/PyMySQL" ;;
+          *) ./setup.sh "test_${TESTNAME}/${TESTNAME}" ;;
+        esac
+        sed -i 's|image: .*|image: ghcr.io/mrmohebi/docker-hoster|' common/infra-docker-hoster/docker-compose.yml
+        # the v4.0 build of this run
+        rm -rf ./proxysql && mv ../proxysql .
+        git -C ./proxysql describe --long --abbrev=7
+        cd "test_${TESTNAME}"
+        sed -i 's/timeout -v -s1 800 //' run-tests.bash
+        # suite specifics, as in sysown/proxysql's ci-3p-<suite>.yml
+        case "${TESTNAME}" in
+          django-framework)
+            mkdir -p "${TESTNAME}/cache"
+            chmod -R 777 "${TESTNAME}/cache"
+            ( cd "${TESTNAME}"
+              if [[ $(git branch --show-current) == stable/5.1.x ]]; then
+                git cherry-pick -n 9609b48 || true
+                git add docs/releases/5.2.txt || true
+                git cherry-pick -n --continue || true
+              fi )
+            ;;
+          pgjdbc)
+            rm -f "${TESTNAME}/pgjdbc/src/test/java/org/postgresql/test/jdbc2/CopyTest.java"
+            sed -i 's/docker-compose/docker compose/g' run-tests.bash
+            ;;
+          mariadb-connector-c|postgresql)
+            sed -i 's/docker-compose/docker compose/g' run-tests.bash
+            ;;
+        esac
+
+    - name: Run tests
+      timeout-minutes: 90
+      run: |
+        cd "proxysql_3p_testing/test_${TESTNAME}"
+        ./run-tests.bash
+
+    - name: Check results
+      if: ${{ !cancelled() }}
+      run: |
+        set +e
+        cd "proxysql_3p_testing/test_${TESTNAME}"
+        sudo chown -R "$(id -u):$(id -g)" ./logs
+        if ! ls ./logs/*/*_summary.log 1>/dev/null 2>&1; then
+          echo "ERROR: No summary log found - tests likely did not run"
+          exit 1
+        fi
+        cat ./logs/*/*_summary.log
+        FAIL_VALUES=$(cat ./logs/*/*_summary.log | grep -oP '(?<=^FAIL: )\S+' | sort -u)
+        ERROR_VALUES=$(cat ./logs/*/*_summary.log | grep -oP '(?<=^ERROR: )\S+' | sort -u)
+        if grep -qvxE '[0-9]+' <<< "${FAIL_VALUES}"; then
+          FAILS="${FAIL_VALUES//$'\n'/,}"
+        else
+          FAILS=$(sort -n <<< "${FAIL_VALUES}" | tail -1)
+        fi
+        ERRORS=''
+        if [[ -n "${ERROR_VALUES}" ]]; then
+          if grep -qvxE '[0-9]+' <<< "${ERROR_VALUES}"; then
+            ERRORS="${ERROR_VALUES//$'\n'/,}"
+          else
+            ERRORS=$(sort -n <<< "${ERROR_VALUES}" | tail -1)
+          fi
+        fi
+        if ! [[ "${FAILS}" =~ ^[0-9]+$ ]]; then
+          echo "ERROR: Could not parse FAIL count from summary log: '${FAILS}'"
+          exit 1
+        fi
+        if [[ ${FAILS} -ne 0 ]]; then
+          echo "FAILED: ${FAILS} test failure(s)"
+          exit 1
+        fi
+        if [[ -n "${ERRORS}" && ! "${ERRORS}" =~ ^[0-9]+$ ]]; then
+          echo "ERROR: Could not parse ERROR count from summary log: '${ERRORS}'"
+          exit 1
+        fi
+        if [[ -n "${ERRORS}" && ${ERRORS} -ne 0 ]]; then
+          echo "FAILED: ${ERRORS} test error(s) (setup/fixture failures)"
+          exit 1
+        fi
+        echo "All tests passed"
+
+    - name: Archive logs
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: 3p-${{ inputs.suite }}-${{ inputs.sha }}-${{ matrix.infradb }}-${{ matrix.connector }}-logs-attempt${{ github.run_attempt }}
+        path: proxysql_3p_testing/test_${{ inputs.suite }}/logs

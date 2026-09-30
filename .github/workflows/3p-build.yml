@@ -64,7 +64,7 @@ jobs:
         set -eo pipefail
         ls -l src/proxysql
         VERSION=$(docker run --rm -v "$PWD/src/proxysql:/usr/bin/proxysql:ro" ubuntu:24.04 bash -c \
-          'apt-get -qq update >/dev/null && apt-get -qq install -y libgnutls30t64 libuuid1 >/dev/null && proxysql --version' 2>&1 | grep -m1 -oP 'ProxySQL version \K\S+')
+          'apt-get -qq update >/dev/null && apt-get -qq install -y libgnutls30t64 libuuid1 >/dev/null && proxysql --version' 2>&1 | grep -m1 -oP 'ProxySQL version \K[^\s,]+')
         echo "version: ${VERSION}"
         [[ ${VERSION} =~ ^4\.0\. ]] || { echo "::error::not a v4.0 build: '${VERSION}'"; exit 1; }
         SHORT=$(git rev-parse --short=7 HEAD)

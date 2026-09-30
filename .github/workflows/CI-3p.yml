@@ -2,6 +2,7 @@
 #   resolve  the sysown/proxysql commit (branch head, default v3.0, or an explicit sha) and the suites
 #   build    ProxySQL v4.0 at that commit (3p-build.yml: PROXYSQL40=1 WITHGCOV=1 make ubuntu24-dbg)
 #   suites   every suite x instance (mysql / mariadb / pgsql) against that build (3p-suite.yml),
+#            postgresql pairs each server with its own source release (REL_<major>_*),
 #            databases and connectors from the MATRIX_3P_<SUITE>_{INFRADB,CONNECTOR}_<INSTANCE> variables
 # Scheduled runs test a commit once: they skip a commit whose build artifact already exists.
 name: CI-3p
@@ -100,12 +101,25 @@ jobs:
             if not isinstance(values, list) or not values: sys.exit(f'{key}: expected a non-empty list')
             return json.dumps(values)
 
+        # suites whose connector is the server's own source release (postgresql: 'make installcheck' of
+        # REL_<major>_<minor>): pair each database with the release of its major version instead of
+        # crossing every database with every release
+        def major_pairs(infradb, connector):
+            pairs = []
+            for db in json.loads(infradb):
+                major = re.sub(r'\D', '', db)
+                releases = [c for c in json.loads(connector) if re.fullmatch(rf'REL_{major}_\d+', c)]
+                if not releases: sys.exit(f'no {connector} release for {db}')
+                pairs += [(json.dumps([db]), json.dumps(releases))]
+            return pairs
+
         suites = []
         for suite, instances in catalogue.items():
             for instance in instances:
                 if wanted and suite not in wanted and f'{suite}/{instance}' not in wanted: continue
-                suites.append(dict(suite=suite, instance=instance,
-                    infradb=axis(suite, 'INFRADB', instance), connector=axis(suite, 'CONNECTOR', instance)))
+                infradb, connector = axis(suite, 'INFRADB', instance), axis(suite, 'CONNECTOR', instance)
+                for db, cn in (major_pairs(infradb, connector) if suite == 'postgresql' else [(infradb, connector)]):
+                    suites.append(dict(suite=suite, instance=instance, infradb=db, connector=cn))
         print(json.dumps(suites, indent=1))
         out('suites', json.dumps(suites))
 

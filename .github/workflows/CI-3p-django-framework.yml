@@ -15,8 +15,12 @@ on:
         default: 'v3.0'
         type: string
       build_run_id:
-        description: 'sysown/proxysql CI-builds run id (optional, speeds up the artifact lookup)'
+        description: 'sysown/proxysql CI-builds run id (the producer of the tested build)'
         default: ''
+        type: string
+      build_attempt:
+        description: 'attempt of that CI-builds run (its ci-manifest identifies the build)'
+        default: '1'
         type: string
 
 concurrency:
@@ -24,10 +28,11 @@ concurrency:
   cancel-in-progress: false
 
 # reusable workflows run with the caller's token permissions: read the repository, manage the run's
-# artifacts (ci-3p-sqlalchemy removes its per-leg summary artifacts)
+# artifacts (ci-3p-sqlalchemy removes its per-leg summary artifacts), report checks
 permissions:
   contents: read
   actions: write
+  checks: write   # the tier-context test jobs report their result as check runs of this repository
 
 jobs:
   run-mysql:
@@ -43,6 +48,7 @@ jobs:
       sha: ${{ inputs.sha }}
       branch: ${{ inputs.branch }}
       build_run_id: ${{ inputs.build_run_id }}
+      producer_attempt: ${{ inputs.build_attempt }}
 
   run-mariadb:
     uses: sysown/proxysql/.github/workflows/ci-3p-django-framework.yml@GH-Actions
@@ -57,6 +63,7 @@ jobs:
       sha: ${{ inputs.sha }}
       branch: ${{ inputs.branch }}
       build_run_id: ${{ inputs.build_run_id }}
+      producer_attempt: ${{ inputs.build_attempt }}
 
   run-pgsql:
     uses: sysown/proxysql/.github/workflows/ci-3p-django-framework.yml@GH-Actions
@@ -71,3 +78,4 @@ jobs:
       sha: ${{ inputs.sha }}
       branch: ${{ inputs.branch }}
       build_run_id: ${{ inputs.build_run_id }}
+      producer_attempt: ${{ inputs.build_attempt }}

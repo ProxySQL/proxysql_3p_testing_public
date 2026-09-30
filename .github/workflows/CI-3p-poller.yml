@@ -1,8 +1,8 @@
 # Starts the 3rd-party suites for new sysown/proxysql builds.
 #
 # Cross-repository workflow_run events do not exist, so this repository polls: for each tracked
-# sysown/proxysql branch it takes the latest successful CI-builds run, checks that its v4.0-tier
-# handoff artifact still exists (retention 1 day), and dispatches every *enabled* CI-3p-* wrapper that
+# sysown/proxysql branch it takes the latest successful CI-builds run, checks that its ci-manifest
+# artifact still exists (the build's tier plan; handoffs are kept 1 day), and dispatches every *enabled* CI-3p-* wrapper that
 # has not run for that commit yet. A wrapper counts as done for a commit when one of its runs has the
 # title '<workflow> <branch> <sha>' (its run-name). Enable/disable a suite by enabling/disabling its
 # workflow in this repository.
@@ -32,7 +32,6 @@ jobs:
         REPO: ${{ github.repository }}
         PROXYSQL_REPO: 'sysown/proxysql'
         BRANCHES: ${{ vars.CI_3P_BRANCHES || 'v3.0' }}
-        HANDOFF_VARIANT: 'ubuntu24-tap-genai-gcov'
       run: |
         set -euo pipefail
 
@@ -52,17 +51,19 @@ jobs:
           RUN_ID='' SHA=''
           # CI-builds is started by workflow_run, so GitHub files every run under the default branch and its
           # head commit, pull request builds included. The built branch and commit are only in the run
-          # title (run-name '<branch> CI-builds <sha>'): select on it and take the commit from it.
-          read -r RUN_ID SHA < <(gh api "repos/${PROXYSQL_REPO}/actions/workflows/CI-builds.yml/runs?status=success&created=>=${SINCE}&per_page=100" \
-                                   --jq "[.workflow_runs[] | select(.display_title | test(\"^${BRANCH//./\\\\.} CI-builds [0-9a-f]{40}$\"))] | max_by(.created_at)
-                                         | \"\\(.id) \\(.display_title | split(\" \") | last)\"") || true
-          if ! [[ "${SHA}" =~ ^[0-9a-f]{40}$ && "${RUN_ID}" =~ ^[0-9]+$ ]]; then
+          # title (run-name '<branch> CI-builds <sha>[ trigger=<id>/<attempt>]'): select on it and take the
+          # commit from it (third word).
+          RUN_ATTEMPT=''
+          read -r RUN_ID RUN_ATTEMPT SHA < <(gh api "repos/${PROXYSQL_REPO}/actions/workflows/CI-builds.yml/runs?status=success&created=>=${SINCE}&per_page=100" \
+                                   --jq "[.workflow_runs[] | select(.display_title | test(\"^${BRANCH//./\\\\.} CI-builds [0-9a-f]{40}( trigger=[0-9]+/[0-9]+)?$\"))] | max_by(.created_at)
+                                         | \"\\(.id) \\(.run_attempt) \\(.display_title | split(\" \") | .[2])\"") || true
+          if ! [[ "${SHA}" =~ ^[0-9a-f]{40}$ && "${RUN_ID}" =~ ^[0-9]+$ && "${RUN_ATTEMPT}" =~ ^[0-9]+$ ]]; then
             echo "${BRANCH}: no successful CI-builds run"; continue
           fi
-          ARTIFACT="ci-builds-handoff-${SHA}-${HANDOFF_VARIANT}-full"
+          # the tier-context consumers bind to the build through its manifest, ci-manifest-<...>-b<run>-a<attempt>
           if [[ -z "$(gh api "repos/${PROXYSQL_REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" \
-                        --jq ".artifacts[] | select(.name == \"${ARTIFACT}\" and .expired == false) | .id")" ]]; then
-            echo "${BRANCH} ${SHA}: handoff artifact missing or expired (CI-builds run ${RUN_ID}), skipping"; continue
+                        --jq ".artifacts[] | select((.name | startswith(\"ci-manifest-\")) and (.name | endswith(\"-b${RUN_ID}-a${RUN_ATTEMPT}\")) and .expired == false) | .id")" ]]; then
+            echo "${BRANCH} ${SHA}: no ci-manifest for CI-builds run ${RUN_ID} attempt ${RUN_ATTEMPT} (expired or built before the tier redesign), skipping"; continue
           fi
           for WF in "${WORKFLOWS[@]}"; do
             TITLE="${WF%.yml} ${BRANCH} ${SHA}"
@@ -70,7 +71,7 @@ jobs:
               echo "${TITLE}: already run"
               continue
             fi
-            echo "${TITLE}: dispatching (CI-builds run ${RUN_ID})"
-            gh workflow run "${WF}" -R "${REPO}" -f sha="${SHA}" -f branch="${BRANCH}" -f build_run_id="${RUN_ID}"
+            echo "${TITLE}: dispatching (CI-builds run ${RUN_ID} attempt ${RUN_ATTEMPT})"
+            gh workflow run "${WF}" -R "${REPO}" -f sha="${SHA}" -f branch="${BRANCH}" -f build_run_id="${RUN_ID}" -f build_attempt="${RUN_ATTEMPT}"
           done
         done

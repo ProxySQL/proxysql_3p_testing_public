@@ -49,6 +49,7 @@ jobs:
       branch: ${{ inputs.branch }}
       build_run_id: ${{ inputs.build_run_id }}
       producer_attempt: ${{ inputs.build_attempt }}
+      consumer_id: run-mysql   # the catalogue instance (row) of this job
 
   run-mariadb:
     uses: sysown/proxysql/.github/workflows/ci-3p-mysql-connector-j.yml@GH-Actions
@@ -64,3 +65,4 @@ jobs:
       branch: ${{ inputs.branch }}
       build_run_id: ${{ inputs.build_run_id }}
       producer_attempt: ${{ inputs.build_attempt }}
+      consumer_id: run-mariadb   # the catalogue instance (row) of this job

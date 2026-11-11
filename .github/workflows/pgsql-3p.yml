@@ -3,7 +3,10 @@
 #   resolve      the sysown/proxysql commit (branch head, default v3.0, or an explicit full sha);
 #                only the sha is passed on, so the tested commit cannot change mid-run
 #   build        ProxySQL v4.0 at that commit, packaged once as a Docker image (pgsql-3p-build.yml)
-#   image-check  a later job loads exactly that image (stage 1; stage 3 replaces it with the suites)
+#   environment-check
+#                loads exactly that image, then starts, proves and stops the four standard legs
+#                (PostgreSQL directly and through ProxySQL, with and without TLS); stage 3 replaces it
+#                with the suite jobs, which use the same scripts around their tests
 # Independent of the MySQL pipeline (CI-3p.yml, 3p-build.yml, 3p-suite.yml).
 name: PostgreSQL 3rd-party tests
 run-name: "PostgreSQL 3rd-party tests ${{ inputs.proxysql_ref }}"
@@ -48,11 +51,14 @@ jobs:
     with:
       sha: ${{ needs.resolve.outputs.sha }}
 
-  # stage 1 check that a later job gets exactly the built image; stage 3 replaces this job with the
-  # suite matrix, which runs the same two scripts before its tests
-  image-check:
+  # stage 2: the test environment of each standard leg comes up and is proven on the build of this run;
+  # stage 3 replaces this job with the suite matrix, which uses the same scripts around its tests
+  environment-check:
     needs: [resolve, build]
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      LEGS: direct-plain direct-tls proxy-plain proxy-tls
     steps:
     - name: Checkout
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -65,6 +71,7 @@ jobs:
         name: ${{ needs.build.outputs.image_artifact }}
 
     - name: Load the image and check it is the build of this run
+      id: image
       env:
         SHA: ${{ needs.resolve.outputs.sha }}
         IMAGE_ID: ${{ needs.build.outputs.image_id }}
@@ -76,8 +83,72 @@ jobs:
         [[ ${TAG} == "${IMAGE_TAG}" ]] || { echo "::error::loaded ${TAG}, expected ${IMAGE_TAG}"; exit 1; }
         VERSION=$(bash pgsql/lib/check-version.sh "${TAG}" "${SHA}")
         [[ ${VERSION} == "${BUILD_VERSION}" ]] || { echo "::error::version ${VERSION}, build reported ${BUILD_VERSION}"; exit 1; }
+        rm -f proxysql-image.tar.zst
+        echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
         {
           echo "### ProxySQL image"
           echo "- version: \`${VERSION}\`"
           echo "- image ID: \`${IMAGE_ID}\`"
         } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Create the test certificates
+      run: bash pgsql/lib/certs.sh "${RUNNER_TEMP}/certs"
+
+    - name: Start, prove and stop each leg
+      env:
+        PROXYSQL_IMAGE: ${{ steps.image.outputs.tag }}
+      run: |
+        set -uo pipefail
+        export CERT_DIR="${RUNNER_TEMP}/certs"
+        for leg in ${LEGS}; do
+          echo "::group::${leg}"
+          # a failed leg is recorded in its leg.json; the other legs still run
+          bash pgsql/lib/leg-up.sh "${leg}" "legs/${leg}" || true
+          bash pgsql/lib/leg-down.sh "legs/${leg}"
+          echo "::endgroup::"
+        done
+
+    - name: Check the artifacts hold no keys or passwords
+      id: guard
+      if: ${{ !cancelled() }}
+      run: |
+        set -uo pipefail
+        : > "${RUNNER_TEMP}/no-secrets"
+        BAD=0
+        for leg in ${LEGS}; do
+          [[ -d legs/${leg}/artifacts ]] || continue
+          SECRETS="legs/${leg}/secrets"
+          [[ -f ${SECRETS} ]] || SECRETS="${RUNNER_TEMP}/no-secrets"
+          bash pgsql/lib/guard-artifacts.sh "legs/${leg}/artifacts" "${SECRETS}" || BAD=1
+        done
+        exit "${BAD}"
+
+    - name: Upload the leg artifacts
+      if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: pgsql-3p-environment-${{ needs.resolve.outputs.sha }}-attempt${{ github.run_attempt }}
+        path: legs/*/artifacts
+        retention-days: 7
+
+    - name: Summary, and fail if a leg is not ready
+      if: ${{ !cancelled() }}
+      run: |
+        set -uo pipefail
+        FAILED=""
+        {
+          echo "### Legs"
+          echo "| Leg | Status | Reason | Server version | Backend protocol | ProxySQL config SHA-256 |"
+          echo "|---|---|---|---|---|---|"
+          for leg in ${LEGS}; do
+            F="legs/${leg}/artifacts/leg.json"
+            if [[ -f ${F} ]]; then
+              jq -r '"| \(.leg) | \(.status) | \(.reason) | \(.server_version // "-") | \(.backend_protocol // "-") | \(.proxysql_config_sha256 // "-") |"' "${F}"
+              [[ $(jq -r .status "${F}") == ready ]] || FAILED+=" ${leg}"
+            else
+              echo "| ${leg} | no leg.json | | | | |"
+              FAILED+=" ${leg}"
+            fi
+          done
+        } >> "$GITHUB_STEP_SUMMARY"
+        [[ -z ${FAILED} ]] || { echo "::error::legs not ready:${FAILED}"; exit 1; }

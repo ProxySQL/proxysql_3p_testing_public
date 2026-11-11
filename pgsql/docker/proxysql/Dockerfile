@@ -9,10 +9,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends default-mysql-client \
     && rm -rf /var/lib/apt/lists/*
 
-COPY proxysql.deb /tmp/proxysql.deb
-RUN apt-get update \
+# bind-mount instead of COPY: the package is installed, not also kept as an image layer
+RUN --mount=type=bind,source=proxysql.deb,target=/tmp/proxysql.deb \
+    apt-get update \
     && apt-get install -y --no-install-recommends /tmp/proxysql.deb \
-    && rm -rf /var/lib/apt/lists/* /tmp/proxysql.deb \
+    && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/lib/proxysql /tmp/gcov
 
 # the build is gcov-instrumented: write coverage files to a scratch directory instead of the build path

@@ -69,11 +69,13 @@ jobs:
         SHA: ${{ needs.resolve.outputs.sha }}
         IMAGE_ID: ${{ needs.build.outputs.image_id }}
         IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+        BUILD_VERSION: ${{ needs.build.outputs.version }}
       run: |
         set -euo pipefail
         TAG=$(bash pgsql/lib/load-image.sh proxysql-image.tar.zst "${IMAGE_ID}")
         [[ ${TAG} == "${IMAGE_TAG}" ]] || { echo "::error::loaded ${TAG}, expected ${IMAGE_TAG}"; exit 1; }
         VERSION=$(bash pgsql/lib/check-version.sh "${TAG}" "${SHA}")
+        [[ ${VERSION} == "${BUILD_VERSION}" ]] || { echo "::error::version ${VERSION}, build reported ${BUILD_VERSION}"; exit 1; }
         {
           echo "### ProxySQL image"
           echo "- version: \`${VERSION}\`"

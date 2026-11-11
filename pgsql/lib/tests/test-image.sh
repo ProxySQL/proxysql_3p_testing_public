@@ -20,11 +20,13 @@ trap cleanup EXIT
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAILED=1; }
 
-# make_deb OUT_DIR FILE_NAME VERSION_STRING: fake package 'proxysql' whose /usr/bin/proxysql
-# prints a log line (as the real binary does) and then 'ProxySQL version <VERSION_STRING>, codename Truls'
+# make_deb OUT_DIR FILE_NAME VERSION_STRING [PAYLOAD_MIB]: fake package 'proxysql' whose /usr/bin/proxysql
+# prints a log line (as the real binary does) and then 'ProxySQL version <VERSION_STRING>, codename Truls';
+# PAYLOAD_MIB adds an incompressible file of that size
 make_deb() {
     local root="${TMP}/pkg-$RANDOM"
-    mkdir -p "${root}/DEBIAN" "${root}/usr/bin" "$1"
+    mkdir -p "${root}/DEBIAN" "${root}/usr/bin" "${root}/usr/share/proxysql" "$1"
+    if [[ -n ${4:-} ]]; then head -c "$(( $4 * 1024 * 1024 ))" /dev/urandom > "${root}/usr/share/proxysql/payload"; fi
     printf 'Package: proxysql\nVersion: 4.0.1\nArchitecture: amd64\nMaintainer: test <test@example.invalid>\nDescription: fake proxysql for tests\n' > "${root}/DEBIAN/control"
     cat > "${root}/usr/bin/proxysql" <<EOF
 #!/bin/sh
@@ -56,6 +58,20 @@ OUT=$(bash "${LIB}/check-version.sh" "${TAG40}" "${SHA_OK}" 2>/dev/null); RC=$?
 ERR=$(bash "${LIB}/check-version.sh" "${TAG40}" "${SHA_OTHER}" 2>&1 >/dev/null); RC=$?
 [[ ${RC} -eq 1 && ${ERR} == *"is not commit 1234567"* ]] && pass "check-version rejects another commit" \
     || fail "check-version wrong commit (rc=${RC}, err='${ERR}')"
+
+for BAD in "" "abcdef1"; do
+    ERR=$(bash "${LIB}/check-version.sh" "${TAG40}" "${BAD}" 2>&1 >/dev/null); RC=$?
+    [[ ${RC} -eq 1 && ${ERR} == *"full 40-hex"* ]] && pass "check-version rejects sha '${BAD}' (not a full commit)" \
+        || fail "check-version sha '${BAD}' (rc=${RC}, err='${ERR}')"
+done
+
+# --- the package is installed, not also kept as an image layer: a 16 MiB payload adds ~16 MiB, not ~32
+make_deb "${TMP}/big" proxysql_4.0.1_amd64.deb "4.0.1-12-gabcdef1_DEBUG" 16
+TAGB="pgsql-3p-proxysql-test:big-$$"; TAGS+=("${TAGB}")
+bash "${LIB}/package-image.sh" "${TMP}/big" "${TAGB}" "${TMP}/imgb.tar.zst" >/dev/null 2>&1
+GROWTH=$(( $(stat -c %s "${TMP}/imgb.tar.zst") - $(stat -c %s "${TMP}/img40.tar.zst") ))
+(( GROWTH > 15 * 1024 * 1024 && GROWTH < 24 * 1024 * 1024 )) && pass "package is stored once in the image" \
+    || fail "image grew by ${GROWTH} bytes for a 16 MiB package payload (expected 15-24 MiB)"
 
 # --- 3.1 package: not a 4.0 build
 make_deb "${TMP}/b31" proxysql_3.1.12_amd64.deb "3.1.12-1802-gabcdef1_DEBUG"

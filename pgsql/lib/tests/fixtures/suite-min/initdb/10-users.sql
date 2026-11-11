@@ -1,0 +1,2 @@
+CREATE ROLE alice LOGIN PASSWORD 'alicepw';
+CREATE DATABASE alicedb OWNER alice;

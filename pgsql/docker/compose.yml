@@ -4,6 +4,8 @@
 #   proxysql  ProxySQL (profile "proxy", proxy legs only), defaults plus the per-leg admin settings
 #   admin     psql to ProxySQL's PostgreSQL admin port (profile "admin")
 #   client    psql, used to prove the connection and TLS state (profile "client")
+#   client-shared  the same, in the leg target's network (suites with NETWORK_MODE=shared)
+# A suite adds its own compose.yml on top (its PostgreSQL setup, its "runner" service).
 services:
   pg:
     image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE is required}
@@ -83,4 +85,12 @@ services:
     entrypoint: [psql]
     volumes:
       # the CA only: the client never sees a private key
+      - ${CERT_DIR:?CERT_DIR is required}/ca.pem:/tls/ca.pem:ro
+
+  client-shared:
+    profiles: [client]
+    image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE is required}
+    network_mode: service:${LEG_TARGET:-pg}
+    entrypoint: [psql]
+    volumes:
       - ${CERT_DIR:?CERT_DIR is required}/ca.pem:/tls/ca.pem:ro

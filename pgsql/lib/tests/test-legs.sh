@@ -97,6 +97,29 @@ check_leg proxy-tls       1 1    verify-full
 check_leg proxy-tls-front 1 0    verify-full
 check_leg proxy-tls-back  0 1    disable
 
+# suite mode: the suite's PostgreSQL setup, users and database, and a shared network (PGHOST=localhost)
+SUITE="${LIB}/tests/fixtures/suite-min"
+for leg in direct-plain proxy-tls; do
+    D="${TMP}/suite-${leg}"
+    SUITE_DIR="${SUITE}" bash "${LIB}/leg-up.sh" "${leg}" "${D}" >"${TMP}/suite-${leg}.out" 2>&1; RC=$?
+    WANT_PORT=$([[ ${leg} == proxy-* ]] && echo 6133 || echo 5432)
+    [[ ${RC} -eq 0 && $(field "${D}" .status) == ready ]] && grep -qx PGHOST=localhost "${D}/conn.env" \
+        && grep -qx PGUSER=alice "${D}/conn.env" && grep -qx PGDATABASE=alicedb "${D}/conn.env" \
+        && grep -qx "PGPORT=${WANT_PORT}" "${D}/conn.env" \
+        && pass "suite ${leg}: ready, conn.env localhost:${WANT_PORT} as alice@alicedb" \
+        || fail "suite ${leg}: rc=${RC} leg.json=$(cat "${D}/artifacts/leg.json" 2>/dev/null) out=$(tail -n3 "${TMP}/suite-${leg}.out")"
+    if [[ ${leg} == proxy-* ]]; then
+        ADMIN=(docker compose --env-file "${D}/compose.env" run --rm --no-deps -T admin -h 127.0.0.1 -p 6132 -U admin -d admin -XqtA)
+        USERS=$("${ADMIN[@]}" -c "SELECT username FROM runtime_pgsql_users ORDER BY username" 2>/dev/null | sort -u | paste -sd,)
+        CREATED=$("${ADMIN[@]}" -c "SELECT variable_value FROM stats_pgsql_global WHERE variable_name = 'Client_Connections_created'" 2>/dev/null)
+        [[ ${USERS} == alice && ${CREATED:-0} -gt 0 ]] \
+            && pass "suite ${leg}: ProxySQL has only the suite's user, and the proof went through ProxySQL (${CREATED} client connections)" \
+            || fail "suite ${leg}: users='${USERS}' client connections='${CREATED}'"
+    fi
+    P=$(project "${D}"); bash "${LIB}/leg-down.sh" "${D}" >/dev/null 2>&1; rm -f "${D}/compose.env"
+    [[ $(leftovers "${P}") -eq 0 ]] || fail "suite ${leg}: leftovers"
+done
+
 # forced setup failure: the ProxySQL image does not exist
 D="${TMP}/missing-image"
 START=$(date +%s)

@@ -1,0 +1,81 @@
+# PostgreSQL 3rd-party tests: run the original test suites of PostgreSQL drivers through ProxySQL and
+# directly against PostgreSQL, and compare the results.
+#   resolve      the sysown/proxysql commit (branch head, default v3.0, or an explicit full sha);
+#                only the sha is passed on, so the tested commit cannot change mid-run
+#   build        ProxySQL v4.0 at that commit, packaged once as a Docker image (pgsql-3p-build.yml)
+#   image-check  a later job loads exactly that image (stage 1; stage 3 replaces it with the suites)
+# Independent of the MySQL pipeline (CI-3p.yml, 3p-build.yml, 3p-suite.yml).
+name: PostgreSQL 3rd-party tests
+run-name: "PostgreSQL 3rd-party tests ${{ inputs.proxysql_ref }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      proxysql_ref:
+        description: 'sysown/proxysql branch, or full 40-hex commit'
+        default: 'v3.0'
+        type: string
+
+# no concurrency group: runs are independent, so several commits can be tested at the same time
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        persist-credentials: false
+
+    - name: Resolve the ProxySQL commit
+      id: resolve
+      env:
+        REF: ${{ inputs.proxysql_ref }}
+      run: |
+        set -euo pipefail
+        SHA=$(bash pgsql/lib/resolve-ref.sh "${REF}")
+        echo "commit: ${SHA}"
+        echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    uses: ./.github/workflows/pgsql-3p-build.yml
+    with:
+      sha: ${{ needs.resolve.outputs.sha }}
+
+  # stage 1 check that a later job gets exactly the built image; stage 3 replaces this job with the
+  # suite matrix, which runs the same two scripts before its tests
+  image-check:
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        persist-credentials: false
+
+    - name: Download the image
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      with:
+        name: ${{ needs.build.outputs.image_artifact }}
+
+    - name: Load the image and check it is the build of this run
+      env:
+        SHA: ${{ needs.resolve.outputs.sha }}
+        IMAGE_ID: ${{ needs.build.outputs.image_id }}
+        IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+      run: |
+        set -euo pipefail
+        TAG=$(bash pgsql/lib/load-image.sh proxysql-image.tar.zst "${IMAGE_ID}")
+        [[ ${TAG} == "${IMAGE_TAG}" ]] || { echo "::error::loaded ${TAG}, expected ${IMAGE_TAG}"; exit 1; }
+        VERSION=$(bash pgsql/lib/check-version.sh "${TAG}" "${SHA}")
+        {
+          echo "### ProxySQL image"
+          echo "- version: \`${VERSION}\`"
+          echo "- image ID: \`${IMAGE_ID}\`"
+        } >> "$GITHUB_STEP_SUMMARY"

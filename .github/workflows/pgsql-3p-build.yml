@@ -1,0 +1,118 @@
+# Builds ProxySQL v4.0 (PROXYSQL40=1, gcov instrumented, ubuntu24 debug) from sysown/proxysql at one
+# commit for the PostgreSQL 3rd-party tests, packages it as a Docker runtime image and publishes the
+# image as an artifact of the calling run, so every suite job tests exactly the same build.
+#
+# The build steps are a copy of 3p-build.yml, kept separate on purpose: changes made there for the
+# MySQL pipeline cannot affect the PostgreSQL tests.
+name: pgsql-3p-build
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: 'sysown/proxysql commit to build (full 40-hex)'
+        required: true
+        type: string
+    outputs:
+      version:
+        description: 'proxysql --version of the build'
+        value: ${{ jobs.build.outputs.version }}
+      image_id:
+        description: 'ID of the runtime image; suite jobs check the loaded image against it'
+        value: ${{ jobs.build.outputs.image_id }}
+      image_tag:
+        description: 'tag of the runtime image (pgsql-3p-proxysql:<sha>)'
+        value: ${{ jobs.build.outputs.image_tag }}
+      image_artifact:
+        description: 'name of the artifact holding proxysql-image.tar.zst'
+        value: ${{ jobs.build.outputs.image_artifact }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (v4.0, ${{ inputs.sha }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      image_id: ${{ steps.pack.outputs.image_id }}
+      image_tag: ${{ steps.pack.outputs.image_tag }}
+      image_artifact: ${{ steps.pack.outputs.image_artifact }}
+    steps:
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        df -h /
+
+    - name: Checkout the pgsql-3p scripts
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        path: pgsql-3p
+        persist-credentials: false
+
+    - name: Checkout proxysql
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        repository: sysown/proxysql
+        ref: ${{ inputs.sha }}
+        # full history and tags: the version (GITVERSION) comes from 'git describe'
+        fetch-depth: 0
+        path: proxysql
+        persist-credentials: false
+
+    - name: Build v4.0 (PROXYSQL40=1 WITHGCOV=1 make ubuntu24-dbg)
+      timeout-minutes: 170
+      working-directory: proxysql
+      run: |
+        set -o pipefail
+        git fetch --tags --force
+        # the ubuntu24 build container gets PROXYSQL40/WITHGCOV through docker-compose.yml's environment
+        # block; PROXYSQL40=1 cascades PROXYSQL31/FFTO/TSDB and the 4.0 GITVERSION (Makefile)
+        PROXYSQL40=1 WITHGCOV=1 make ubuntu24-dbg 2>&1 | tee build.log
+        grep -q 'exited with code 0' build.log
+
+    - name: Package the runtime image
+      id: pack
+      env:
+        SHA: ${{ inputs.sha }}
+      run: |
+        set -euo pipefail
+        ls -l proxysql/binaries/
+        TAG="pgsql-3p-proxysql:${SHA}"
+        ID=$(bash pgsql-3p/pgsql/lib/package-image.sh proxysql/binaries "${TAG}" proxysql-image.tar.zst | tail -n1)
+        ls -l proxysql-image.tar.zst
+        echo "image: ${TAG} ${ID}"
+        {
+          echo "image_id=${ID}"
+          echo "image_tag=${TAG}"
+          echo "image_artifact=pgsql-3p-proxysql-image-${SHA}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Check the image is the v4.0 build of this commit
+      id: check
+      env:
+        SHA: ${{ inputs.sha }}
+        TAG: ${{ steps.pack.outputs.image_tag }}
+      run: |
+        set -euo pipefail
+        VERSION=$(bash pgsql-3p/pgsql/lib/check-version.sh "${TAG}" "${SHA}")
+        echo "version: ${VERSION}"
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+    - name: Upload the image
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ${{ steps.pack.outputs.image_artifact }}
+        path: proxysql-image.tar.zst
+        compression-level: 0
+        retention-days: 3
+
+    - name: Upload the build log
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: pgsql-3p-build-log-${{ inputs.sha }}
+        path: proxysql/build.log
+        retention-days: 7

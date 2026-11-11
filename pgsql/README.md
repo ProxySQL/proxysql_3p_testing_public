@@ -205,6 +205,7 @@ docker run --rm --entrypoint proxysql pgsql-3p-proxysql:<commit> --version
 | `not a v4.0 build: '...'` | The build did not produce ProxySQL 4.0 (for example, a changed Makefile flag) |
 | `version '...' is not commit ...` | The binary was not built from the requested commit |
 | `expected exactly one proxysql_*.deb in ...` | The build produced no package, or more than one |
+| `docker build of ... failed after 3 attempts` | The runtime image could not be built, usually because Ubuntu's package servers could not be reached (`Temporary failure resolving 'archive.ubuntu.com'`). Each download is retried by apt, and the whole image build is tried 3 times with a pause; if it still fails, use **Re-run failed jobs** |
 | `image ... has ID ..., expected ...` | A job loaded a different image than the build produced (wrong or stale artifact); re-run the whole workflow |
 | `legs not ready: ...` | At least one leg's setup failed; the summary table and that leg's `leg.json` give the step and the reason |
 | `<leg>: infra_failure: start postgresql: ...` | PostgreSQL did not start or did not become healthy within 120 seconds; see `postgresql.log` |
@@ -221,7 +222,8 @@ bash pgsql/lib/tests/test-image.sh         # needs docker, dpkg-deb, zstd and ne
 ```
 
 `test-image.sh` uses small fake ProxySQL packages instead of the real build, so it checks the scripts'
-behaviour (version and commit checks, package selection, image size, image ID checks), not ProxySQL.
+behaviour (version and commit checks, package selection, image size, image ID checks, retrying a
+failed image build), not ProxySQL.
 
 ```bash
 bash pgsql/lib/tests/test-certs.sh          # needs openssl

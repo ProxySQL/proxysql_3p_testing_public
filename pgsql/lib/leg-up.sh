@@ -119,17 +119,17 @@ SERVER_VERSION=$(psql_pg -tAc 'SHOW server_version')
 psql_pg -c 'SHOW ALL' > "${LEG_DIR}/artifacts/postgresql-settings.txt"
 
 if [[ ${PROXY} -eq 1 ]]; then
-    # MYSQL_PWD instead of -p: no password warning on stderr, so real admin errors stay visible
-    admin() { "${DC[@]}" exec -T -e MYSQL_PWD=admin proxysql mysql -h127.0.0.1 -P6032 -uadmin -NB "$@"; }
+    # ProxySQL's admin interface over its PostgreSQL protocol port, tab-separated rows without headers
+    admin() { "${DC[@]}" run --rm --no-deps -T admin -h 127.0.0.1 -p 6132 -U admin -d admin -X -q -tA -F $'\t' -v ON_ERROR_STOP=1 "$@"; }
 
     STEP="start proxysql"
     "${DC[@]}" up -d --quiet-pull proxysql
     for _ in $(seq 60); do
-        admin -e 'SELECT 1' >/dev/null 2>&1 && break
+        admin -c 'SELECT 1' >/dev/null 2>&1 && break
         [[ $(docker inspect -f '{{.State.Running}}' "$("${DC[@]}" ps -aq proxysql)") == true ]] || fail "proxysql container exited"
         sleep 1
     done
-    admin -e 'SELECT 1' >/dev/null 2>&1 || fail "proxysql admin port 6032 not reachable after 60s"
+    admin -c 'SELECT 1' >/dev/null 2>&1 || fail "proxysql admin port 6132 not reachable after 60s"
 
     STEP="configure proxysql"
     OUT=$(admin 2>&1 <<EOF
@@ -145,7 +145,7 @@ EOF
     ) || fail "proxysql admin: ${OUT}"
 
     STEP="check backend protocol"
-    NATIVE=$(admin -e "SELECT variable_value FROM runtime_global_variables WHERE variable_name = 'pgsql-use_native_backend_protocol'")
+    NATIVE=$(admin -c "SELECT variable_value FROM runtime_global_variables WHERE variable_name = 'pgsql-use_native_backend_protocol'")
     [[ ${NATIVE} == true ]] || fail "pgsql-use_native_backend_protocol is '${NATIVE}', expected 'true' (native backend protocol)"
     BACKEND_PROTOCOL=native
 
@@ -153,13 +153,13 @@ EOF
     # configuration only (no runtime state such as server status); password values masked
     {
         echo "== runtime_global_variables (pgsql-%)"
-        admin -e "SELECT variable_name, CASE WHEN variable_name LIKE '%password%' THEN '***' ELSE variable_value END
+        admin -c "SELECT variable_name, CASE WHEN variable_name LIKE '%password%' THEN '***' ELSE variable_value END
                   FROM runtime_global_variables WHERE variable_name LIKE 'pgsql-%' ORDER BY variable_name"
         echo "== runtime_pgsql_servers"
-        admin -e "SELECT hostgroup_id, hostname, port, weight, compression, max_connections, max_replication_lag,
+        admin -c "SELECT hostgroup_id, hostname, port, weight, compression, max_connections, max_replication_lag,
                   use_ssl, max_latency_ms, comment FROM runtime_pgsql_servers ORDER BY hostgroup_id, hostname, port"
         echo "== runtime_pgsql_users (without password)"
-        admin -e "SELECT username, active, use_ssl, default_hostgroup, transaction_persistent, fast_forward, backend,
+        admin -c "SELECT username, active, use_ssl, default_hostgroup, transaction_persistent, fast_forward, backend,
                   frontend, max_connections, attributes, comment FROM runtime_pgsql_users ORDER BY username, frontend"
     } > "${LEG_DIR}/artifacts/proxysql-config.txt"
     CONFIG_SHA=$(sha256sum "${LEG_DIR}/artifacts/proxysql-config.txt" | cut -d' ' -f1)

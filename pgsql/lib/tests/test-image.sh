@@ -99,6 +99,30 @@ TAGD="pgsql-3p-proxysql-test:dbg-$$"; TAGS+=("${TAGD}")
 bash "${LIB}/package-image.sh" "${TMP}/dbg" "${TAGD}" "${TMP}/imgd.tar.zst" >/dev/null 2>&1; RC=$?
 [[ ${RC} -eq 0 ]] && pass "package-image ignores dbgsym packages" || fail "package-image dbgsym (rc=${RC})"
 
+# --- a failed docker build (e.g. DNS failure inside apt) is retried: a shim 'docker' fails the first N builds
+REAL_DOCKER=$(command -v docker)
+mkdir -p "${TMP}/shim"
+# shellcheck disable=SC2016  # single quotes on purpose: this is the shim's own script text
+printf '%s\n' '#!/bin/sh' \
+    'if [ "$1" = build ]; then' \
+    '    n=$(( $(cat "$SHIM_DIR/builds" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$SHIM_DIR/builds"' \
+    '    if [ "$n" -le "$(cat "$SHIM_DIR/fail")" ]; then echo "simulated build failure $n" >&2; exit 1; fi' \
+    'fi' \
+    'exec "$REAL_DOCKER" "$@"' > "${TMP}/shim/docker"
+chmod +x "${TMP}/shim/docker"
+export SHIM_DIR="${TMP}/shim" REAL_DOCKER
+
+echo 1 > "${TMP}/shim/fail"; rm -f "${TMP}/shim/builds"
+TAGR="pgsql-3p-proxysql-test:retry-$$"; TAGS+=("${TAGR}")
+OUT=$(PATH="${TMP}/shim:${PATH}" PGSQL3P_RETRY_DELAY=1 bash "${LIB}/package-image.sh" "${TMP}/b40" "${TAGR}" "${TMP}/imgr.tar.zst" 2>/dev/null); RC=$?
+[[ ${RC} -eq 0 && $(tail -n1 <<< "${OUT}") =~ ^sha256: && $(cat "${TMP}/shim/builds") -eq 2 ]] \
+    && pass "package-image retries a failed docker build" || fail "retry once (rc=${RC}, builds=$(cat "${TMP}/shim/builds" 2>/dev/null))"
+
+echo 99 > "${TMP}/shim/fail"; rm -f "${TMP}/shim/builds"
+ERR=$(PATH="${TMP}/shim:${PATH}" PGSQL3P_RETRY_DELAY=1 bash "${LIB}/package-image.sh" "${TMP}/b40" "pgsql-3p-proxysql-test:never-$$" "${TMP}/x.tar.zst" 2>&1 >/dev/null); RC=$?
+[[ ${RC} -eq 1 && $(cat "${TMP}/shim/builds") -eq 3 && ${ERR} == *"3 attempts"* ]] \
+    && pass "package-image gives up after 3 attempts" || fail "retry exhausted (rc=${RC}, builds=$(cat "${TMP}/shim/builds" 2>/dev/null))"
+
 # --- load-image: correct and wrong expected ID
 docker rmi -f "${TAG40}" >/dev/null 2>&1
 OUT=$(bash "${LIB}/load-image.sh" "${TMP}/img40.tar.zst" "${ID40}" 2>/dev/null); RC=$?

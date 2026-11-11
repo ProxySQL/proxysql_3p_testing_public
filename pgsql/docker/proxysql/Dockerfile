@@ -5,14 +5,15 @@ ARG UBUNTU_IMAGE
 FROM ${UBUNTU_IMAGE}
 
 # the MySQL client talks to ProxySQL's admin interface (port 6032); separate layer so it caches locally
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends default-mysql-client \
+# apt retries each failed download itself; package-image.sh also retries the whole build
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends default-mysql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # bind-mount instead of COPY: the package is installed, not also kept as an image layer
 RUN --mount=type=bind,source=proxysql.deb,target=/tmp/proxysql.deb \
-    apt-get update \
-    && apt-get install -y --no-install-recommends /tmp/proxysql.deb \
+    apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends /tmp/proxysql.deb \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/lib/proxysql /tmp/gcov
 

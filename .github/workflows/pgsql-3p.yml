@@ -102,29 +102,32 @@ jobs:
         export CERT_DIR="${RUNNER_TEMP}/certs"
         for leg in ${LEGS}; do
           echo "::group::${leg}"
-          # a failed leg is recorded in its leg.json; the other legs still run
-          bash pgsql/lib/leg-up.sh "${leg}" "legs/${leg}" || true
+          # a failed leg is recorded in its leg.json; the other legs still run. The timeout is a backstop:
+          # leg-up's own limits add up to about 4 minutes
+          timeout 300 bash pgsql/lib/leg-up.sh "${leg}" "legs/${leg}" || true
           bash pgsql/lib/leg-down.sh "legs/${leg}"
           echo "::endgroup::"
         done
 
+    # always(): the logs matter most when the job was stopped, e.g. by its timeout
     - name: Check the artifacts hold no keys or passwords
       id: guard
-      if: ${{ !cancelled() }}
+      if: ${{ always() }}
       run: |
         set -uo pipefail
         : > "${RUNNER_TEMP}/no-secrets"
         BAD=0
-        for leg in ${LEGS}; do
-          [[ -d legs/${leg}/artifacts ]] || continue
-          SECRETS="legs/${leg}/secrets"
+        # every folder the upload below takes, not only the expected legs
+        for d in legs/*/artifacts; do
+          [[ -d ${d} ]] || continue
+          SECRETS="${d%/artifacts}/secrets"
           [[ -f ${SECRETS} ]] || SECRETS="${RUNNER_TEMP}/no-secrets"
-          bash pgsql/lib/guard-artifacts.sh "legs/${leg}/artifacts" "${SECRETS}" || BAD=1
+          bash pgsql/lib/guard-artifacts.sh "${d}" "${SECRETS}" || BAD=1
         done
         exit "${BAD}"
 
     - name: Upload the leg artifacts
-      if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
+      if: ${{ always() && steps.guard.outcome == 'success' }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: pgsql-3p-environment-${{ needs.resolve.outputs.sha }}-attempt${{ github.run_attempt }}
@@ -132,23 +135,9 @@ jobs:
         retention-days: 7
 
     - name: Summary, and fail if a leg is not ready
-      if: ${{ !cancelled() }}
+      if: ${{ always() }}
       run: |
         set -uo pipefail
-        FAILED=""
-        {
-          echo "### Legs"
-          echo "| Leg | Status | Reason | Server version | Backend protocol | ProxySQL config SHA-256 |"
-          echo "|---|---|---|---|---|---|"
-          for leg in ${LEGS}; do
-            F="legs/${leg}/artifacts/leg.json"
-            if [[ -f ${F} ]]; then
-              jq -r '"| \(.leg) | \(.status) | \(.reason) | \(.server_version // "-") | \(.backend_protocol // "-") | \(.proxysql_config_sha256 // "-") |"' "${F}"
-              [[ $(jq -r .status "${F}") == ready ]] || FAILED+=" ${leg}"
-            else
-              echo "| ${leg} | no leg.json | | | | |"
-              FAILED+=" ${leg}"
-            fi
-          done
-        } >> "$GITHUB_STEP_SUMMARY"
-        [[ -z ${FAILED} ]] || { echo "::error::legs not ready:${FAILED}"; exit 1; }
+        echo "### Legs" >> "$GITHUB_STEP_SUMMARY"
+        # shellcheck disable=SC2086  # one argument per leg
+        bash pgsql/lib/legs-summary.sh legs ${LEGS} >> "$GITHUB_STEP_SUMMARY"

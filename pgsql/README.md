@@ -38,8 +38,9 @@ TLS) on it. No test suites run yet; they are added in later stages (see
 | `pgsql/lib/leg-up.sh` | Starts one leg, prepares PostgreSQL, configures ProxySQL, proves the connection and TLS |
 | `pgsql/lib/prove-tls.sh` | The connection and TLS proof used by `leg-up.sh` |
 | `pgsql/lib/leg-down.sh` | Saves the leg's logs and container state, then removes its containers |
-| `pgsql/lib/guard-artifacts.sh` | Stops an upload that contains a private key or a password |
-| `pgsql/lib/tests/` | Tests for the scripts above (`test-certs.sh`, `test-guard.sh`, `test-legs.sh`) |
+| `pgsql/lib/guard-artifacts.sh` | Stops an upload that contains a private key or a password (text, binary or symlinked files) |
+| `pgsql/lib/legs-summary.sh` | Writes the per-leg table of the run page summary |
+| `pgsql/lib/tests/` | Tests for the scripts above (`test-certs.sh`, `test-guard.sh`, `test-legs-summary.sh`, `test-legs.sh`) |
 
 The workflows only call the scripts, so everything except the real ProxySQL build can be tested on a
 developer machine.
@@ -100,7 +101,11 @@ leg-up.sh   start PostgreSQL 18.6 (TLS always on) ─┐
 leg-down.sh save logs and container state, remove containers, networks and volumes
 ```
 
-Every leg starts from new containers, so nothing carries over from one leg to the next.
+Every leg starts from new containers, so nothing carries over from one leg to the next. Each step has
+a time limit (PostgreSQL healthy within 120 seconds, ProxySQL's admin port within 60 seconds, the proof
+within 30 seconds, each connection attempt 10 seconds), so a hanging ProxySQL makes the leg fail
+instead of blocking the job. `leg-down.sh` removes every container of the leg, including one-off
+containers started with `docker compose run`.
 
 **TLS.** PostgreSQL always accepts TLS, and ProxySQL always accepts TLS from clients (its default), in
 every leg. Each side is then decided per leg:
@@ -219,14 +224,16 @@ bash pgsql/lib/tests/test-image.sh         # needs docker, dpkg-deb, zstd and ne
 behaviour (version and commit checks, package selection, image size, image ID checks), not ProxySQL.
 
 ```bash
-bash pgsql/lib/tests/test-certs.sh   # needs openssl
-bash pgsql/lib/tests/test-guard.sh   # needs openssl
+bash pgsql/lib/tests/test-certs.sh          # needs openssl
+bash pgsql/lib/tests/test-guard.sh          # needs openssl
+bash pgsql/lib/tests/test-legs-summary.sh   # needs jq
 PROXYSQL_IMAGE=pgsql-3p-proxysql:<commit> bash pgsql/lib/tests/test-legs.sh   # docker, jq; about 5 minutes
 ```
 
 `test-legs.sh` brings up all six legs with a real ProxySQL image, checks each one, and also checks
-that a wrong TLS expectation fails, that a missing image is reported as an `infra_failure`, and that
-nothing is left behind. To get the image of a run (kept for 3 days):
+that a wrong TLS expectation fails, that the proof gives up quickly when ProxySQL hangs, that a
+missing image is reported as an `infra_failure`, and that nothing is left behind (not even a one-off
+container). To get the image of a run (kept for 3 days):
 
 ```bash
 gh run download <run-id> -R ProxySQL/proxysql_3p_testing_public -n pgsql-3p-proxysql-image-<commit>

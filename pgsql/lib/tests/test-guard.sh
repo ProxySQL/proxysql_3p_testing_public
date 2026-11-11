@@ -30,6 +30,17 @@ guard "${TMP}/pw" "${SECRETS}"
 [[ ${RC} -eq 1 && ${OUT} == *app.log* && ${OUT} != *s3cr3t-value* ]] \
     && pass "secret value is detected, file named, value not printed" || fail "secret (rc=${RC}: ${OUT})"
 
+mkdir -p "${TMP}/bin"; { printf 'log\0'; openssl genrsa 2048 2>/dev/null; } > "${TMP}/bin/output.bin"
+guard "${TMP}/bin" "${SECRETS}"
+[[ ${RC} -eq 1 && ${OUT} == *output.bin* ]] && pass "private key after a NUL byte (binary file) is detected" \
+    || fail "binary file (rc=${RC}: ${OUT})"
+
+mkdir -p "${TMP}/outside" "${TMP}/link"; openssl genrsa 2048 2>/dev/null > "${TMP}/outside/key.pem"
+ln -s "${TMP}/outside/key.pem" "${TMP}/link/key-link.pem"
+guard "${TMP}/link" "${SECRETS}"
+[[ ${RC} -eq 1 && ${OUT} == *key-link.pem* ]] && pass "private key behind a symlink is detected" \
+    || fail "symlink (rc=${RC}: ${OUT})"
+
 printf '\nother-secret\n\n' > "${TMP}/secrets-empty-lines"
 guard "${TMP}/clean" "${TMP}/secrets-empty-lines"
 [[ ${RC} -eq 0 ]] && pass "empty lines in the secrets file are ignored" || fail "empty lines (rc=${RC}: ${OUT})"

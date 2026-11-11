@@ -17,7 +17,10 @@ if [[ -f ${LEG_DIR}/compose.env ]]; then
         dc cp proxysql:/var/lib/proxysql/proxysql.log "${A}/proxysql-errorlog.log" >/dev/null 2>&1 \
             || rm -f "${A}/proxysql-errorlog.log"
     fi
-    IDS=$(dc ps -aq 2>/dev/null)
+    # all containers of the project, including one-off 'docker compose run' containers, which 'down'
+    # does not remove for services behind a profile
+    PROJECT=$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' "${LEG_DIR}/compose.env")
+    IDS=$(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT}")
     if [[ -n ${IDS} ]]; then
         # shellcheck disable=SC2086  # one argument per container id
         docker inspect ${IDS} | jq '[.[] | {service: .Config.Labels["com.docker.compose.service"],
@@ -26,6 +29,8 @@ if [[ -f ${LEG_DIR}/compose.env ]]; then
     else
         echo '[]' > "${A}/containers.json"
     fi
+    # shellcheck disable=SC2086  # one argument per container id
+    [[ -z ${IDS} ]] || docker rm -f -v ${IDS} >/dev/null 2>&1
     dc down -v --remove-orphans --timeout 10 >/dev/null 2>&1 || echo "::warning::docker compose down failed for ${LEG_DIR}" >&2
 fi
 

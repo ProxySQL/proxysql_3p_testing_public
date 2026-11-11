@@ -65,6 +65,20 @@ check_leg() {
             && fail "direct-tls: proof expecting no TLS passed" || pass "direct-tls: proof expecting no TLS fails" ;;
     esac
 
+    case ${leg} in
+        direct-plain)  # a one-off container (as a stage 3 suite runner will be) must not survive leg-down
+            docker compose --env-file "${d}/compose.env" run -d --no-deps --entrypoint sleep client 600 >/dev/null 2>&1 ;;
+        proxy-plain)   # a ProxySQL that accepts TCP but never answers must not hang the proof
+            grep -qx 'PGCONNECT_TIMEOUT=10' "${d}/conn.env" && pass "proxy-plain: conn.env sets PGCONNECT_TIMEOUT=10" \
+                || fail "proxy-plain: conn.env has no PGCONNECT_TIMEOUT=10"
+            docker compose --env-file "${d}/compose.env" pause proxysql >/dev/null 2>&1
+            local t0=${SECONDS}
+            timeout 120 bash "${LIB}/prove-tls.sh" "${d}" 0 0 >/dev/null 2>&1; rc=$?
+            [[ ${rc} -eq 1 && $(( SECONDS - t0 )) -lt 60 ]] && pass "proxy-plain: proof fails within 60s when ProxySQL hangs ($(( SECONDS - t0 ))s)" \
+                || fail "proxy-plain: hung ProxySQL: proof rc=${rc} after $(( SECONDS - t0 ))s"
+            docker compose --env-file "${d}/compose.env" unpause proxysql >/dev/null 2>&1 ;;
+    esac
+
     p=$(project "${d}")
     bash "${LIB}/leg-down.sh" "${d}" >/dev/null 2>&1; rc=$?
     local logs_ok=1
@@ -88,8 +102,9 @@ D="${TMP}/missing-image"
 START=$(date +%s)
 PROXYSQL_IMAGE=pgsql-3p-no-such-image:none timeout 180 bash "${LIB}/leg-up.sh" proxy-plain "${D}" >"${TMP}/missing.out" 2>&1; RC=$?
 ELAPSED=$(( $(date +%s) - START ))
-[[ ${RC} -eq 1 && $(field "${D}" .status) == infra_failure && $(field "${D}" .reason) == *proxysql* ]] \
-    && pass "missing ProxySQL image: infra_failure after ${ELAPSED}s, reason names proxysql" \
+[[ ${RC} -eq 1 && $(field "${D}" .status) == infra_failure && $(field "${D}" .reason) == *proxysql* \
+    && $(field "${D}" .reason) == *"up -d"* && $(field "${D}" .backend_protocol) == null ]] \
+    && pass "missing ProxySQL image: infra_failure after ${ELAPSED}s, reason names the failed command, no backend protocol claimed" \
     || fail "missing image: rc=${RC} leg.json=$(cat "${D}/artifacts/leg.json" 2>/dev/null)"
 P=$(project "${D}" 2>/dev/null)
 bash "${LIB}/leg-down.sh" "${D}" >/dev/null 2>&1; RC=$?

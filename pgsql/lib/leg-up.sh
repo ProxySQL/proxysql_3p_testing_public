@@ -4,7 +4,7 @@
 # its defaults plus the minimum the leg needs, and proves the connection and TLS state.
 # Writes LEG_DIR/artifacts/leg.json with status "ready" (exit 0) or "infra_failure" and a reason (exit 1).
 # Private files (never upload): LEG_DIR/compose.env, conn.env, pg-admin.env, secrets.
-set -euo pipefail
+set -Eeuo pipefail   # -E: the ERR trap also fires inside functions
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR source=../versions.env
@@ -31,7 +31,7 @@ if [[ ${TARGET} == proxysql ]]; then PROXY=1 PROFILES=proxy; fi
 mkdir -p "${LEG_DIR}/artifacts"
 LEG_DIR=$(cd "${LEG_DIR}" && pwd)
 STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-STEP=init ERR="" SERVER_VERSION="" CONFIG_SHA=""
+STEP=init ERR="" SERVER_VERSION="" CONFIG_SHA="" BACKEND_PROTOCOL=""
 
 write_json() {
     jq -n --arg leg "${LEG}" --arg target "${TARGET}:${PORT}" \
@@ -39,12 +39,13 @@ write_json() {
         --arg status "$1" --arg reason "$2" --arg started_at "${STARTED}" \
         --arg postgres_image "${POSTGRES_IMAGE}" --arg proxysql_image "${PROXYSQL_IMAGE:-}" \
         --arg server_version "${SERVER_VERSION}" --arg config_sha "${CONFIG_SHA}" --argjson proxy "${PROXY}" \
+        --arg backend_protocol "${BACKEND_PROTOCOL}" \
         '{leg: $leg, target: $target, client_tls: $client_tls, backend_tls: $backend_tls,
-          status: $status, reason: $reason, started_at: $started_at, ended_at: null,
+          status: $status, reason: ($reason | gsub("[\r\n]+"; " ")), started_at: $started_at, ended_at: null,
           postgres_image: $postgres_image,
           proxysql_image: (if $proxy == 1 then $proxysql_image else null end),
           server_version: (if $server_version == "" then null else $server_version end),
-          backend_protocol: (if $proxy == 1 then "native" else null end),
+          backend_protocol: (if $backend_protocol == "" then null else $backend_protocol end),
           proxysql_config_sha256: (if $config_sha == "" then null else $config_sha end)}' \
         > "${LEG_DIR}/artifacts/leg.json"
 }
@@ -88,6 +89,7 @@ PGUSER=pgsql3p
 PGPASSWORD=${APP_PW}
 PGSSLMODE=$([[ ${CLIENT_TLS} == 1 ]] && echo verify-full || echo disable)
 PGSSLROOTCERT=/tls/ca.pem
+PGCONNECT_TIMEOUT=10
 EOF
 cat > "${LEG_DIR}/pg-admin.env" <<EOF
 PGHOST=pg
@@ -99,11 +101,12 @@ PGSSLMODE=disable
 EOF
 umask 022
 cp "${CERT_DIR}/cert-metadata.txt" "${LEG_DIR}/artifacts/"
-dc() { docker compose --env-file "${LEG_DIR}/compose.env" "$@"; }
-psql_pg() { dc exec -T pg psql -U postgres -X -v ON_ERROR_STOP=1 "$@"; }
+# an array, not a function: a failing call then shows up in the reason as the line that ran it
+DC=(docker compose --env-file "${LEG_DIR}/compose.env")
+psql_pg() { "${DC[@]}" exec -T pg psql -U postgres -X -v ON_ERROR_STOP=1 "$@"; }
 
 STEP="start postgresql"
-dc up -d --quiet-pull --wait --wait-timeout 120 pg
+"${DC[@]}" up -d --quiet-pull --wait --wait-timeout 120 pg
 
 STEP="prepare postgresql"
 # 'monitor'/'monitor' are ProxySQL's default monitor credentials, so ProxySQL's monitor settings stay default
@@ -116,19 +119,20 @@ SERVER_VERSION=$(psql_pg -tAc 'SHOW server_version')
 psql_pg -c 'SHOW ALL' > "${LEG_DIR}/artifacts/postgresql-settings.txt"
 
 if [[ ${PROXY} -eq 1 ]]; then
-    admin() { dc exec -T proxysql mysql -h127.0.0.1 -P6032 -uadmin -padmin -NB "$@" 2>/dev/null; }
+    # MYSQL_PWD instead of -p: no password warning on stderr, so real admin errors stay visible
+    admin() { "${DC[@]}" exec -T -e MYSQL_PWD=admin proxysql mysql -h127.0.0.1 -P6032 -uadmin -NB "$@"; }
 
     STEP="start proxysql"
-    dc up -d --quiet-pull proxysql
+    "${DC[@]}" up -d --quiet-pull proxysql
     for _ in $(seq 60); do
-        admin -e 'SELECT 1' >/dev/null && break
-        [[ $(docker inspect -f '{{.State.Running}}' "$(dc ps -aq proxysql)") == true ]] || fail "proxysql container exited"
+        admin -e 'SELECT 1' >/dev/null 2>&1 && break
+        [[ $(docker inspect -f '{{.State.Running}}' "$("${DC[@]}" ps -aq proxysql)") == true ]] || fail "proxysql container exited"
         sleep 1
     done
-    admin -e 'SELECT 1' >/dev/null || fail "proxysql admin port 6032 not reachable after 60s"
+    admin -e 'SELECT 1' >/dev/null 2>&1 || fail "proxysql admin port 6032 not reachable after 60s"
 
     STEP="configure proxysql"
-    admin <<EOF
+    OUT=$(admin 2>&1 <<EOF
 DELETE FROM pgsql_users;
 INSERT INTO pgsql_users (username, password, fast_forward, default_hostgroup) VALUES ('pgsql3p', '${APP_PW}', 0, 0);
 DELETE FROM pgsql_servers;
@@ -138,10 +142,12 @@ LOAD PGSQL USERS TO RUNTIME;
 LOAD PGSQL SERVERS TO RUNTIME;
 LOAD PGSQL VARIABLES TO RUNTIME;
 EOF
+    ) || fail "proxysql admin: ${OUT}"
 
     STEP="check backend protocol"
     NATIVE=$(admin -e "SELECT variable_value FROM runtime_global_variables WHERE variable_name = 'pgsql-use_native_backend_protocol'")
     [[ ${NATIVE} == true ]] || fail "pgsql-use_native_backend_protocol is '${NATIVE}', expected 'true' (native backend protocol)"
+    BACKEND_PROTOCOL=native
 
     STEP="dump proxysql config"
     # configuration only (no runtime state such as server status); password values masked
@@ -161,9 +167,10 @@ fi
 
 STEP="prove connection and tls"
 EXPECT_SSL=$([[ ${PROXY} -eq 1 ]] && echo "${BACKEND_TLS}" || echo "${CLIENT_TLS}")
-# ProxySQL may still be opening its first backend connection: retry for up to 30 s
-for _ in $(seq 15); do
-    PROOF=$(bash "${HERE}/prove-tls.sh" "${LEG_DIR}" "${CLIENT_TLS}" "${EXPECT_SSL}" 2>&1) && break
+# ProxySQL may still be opening its first backend connection: retry until 30 s have passed
+DEADLINE=$(( SECONDS + 30 ))
+until PROOF=$(bash "${HERE}/prove-tls.sh" "${LEG_DIR}" "${CLIENT_TLS}" "${EXPECT_SSL}" 2>&1); do
+    (( SECONDS < DEADLINE )) || break
     sleep 2
 done
 [[ ${PROOF} == ok:* ]] || fail "${PROOF//::error::/}"

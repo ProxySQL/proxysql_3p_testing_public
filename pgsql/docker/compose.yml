@@ -78,6 +78,7 @@ services:
     entrypoint: [psql]
     environment:
       PGPASSWORD: admin
+      PGCONNECT_TIMEOUT: "10"
 
   client:
     profiles: [client]

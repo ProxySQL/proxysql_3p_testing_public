@@ -3,7 +3,8 @@
 Prints the summed test counts of the JUnit XML files in DIR as one JSON object
 ({"total", "failures", "errors", "skipped", "files", "files_unreadable"}), or null if DIR has no
 *.xml. Handles <testsuite> and <testsuites> roots. A file that cannot be parsed (for example cut off
-when a runner was killed) is counted in files_unreadable and otherwise ignored.
+when a runner was killed, or with a non-numeric count) is counted in files_unreadable and otherwise
+ignored.
 """
 import glob
 import json
@@ -29,14 +30,13 @@ def main(directory):
     files = unreadable = 0
     for path in paths:
         try:
-            root = ET.parse(path).getroot()
-        except (ET.ParseError, OSError):
+            counts = [int(suite.get(key) or 0) for suite in suites(ET.parse(path).getroot()) for key in KEYS]
+        except (ET.ParseError, OSError, ValueError):
             unreadable += 1
             continue
         files += 1
-        for suite in suites(root):
-            for key in KEYS:
-                totals[key] += int(suite.get(key) or 0)
+        for i, value in enumerate(counts):
+            totals[KEYS[i % len(KEYS)]] += value
     print(json.dumps({"total": totals["tests"], "failures": totals["failures"], "errors": totals["errors"],
                       "skipped": totals["skipped"], "files": files, "files_unreadable": unreadable}))
 

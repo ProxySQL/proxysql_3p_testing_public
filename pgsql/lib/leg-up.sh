@@ -67,6 +67,8 @@ on_exit() {
 }
 trap on_err ERR
 trap on_exit EXIT
+# stopped from outside (run-suite.sh's time limit): still record infra_failure on the way out
+trap 'ERR="stopped (time limit)"; exit 143' TERM
 
 STEP="check inputs"
 [[ -n ${CERT_DIR:-} && -f ${CERT_DIR}/server.pem ]] || fail "CERT_DIR must point to a certs.sh directory"

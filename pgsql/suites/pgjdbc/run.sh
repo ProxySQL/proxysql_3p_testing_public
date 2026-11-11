@@ -36,4 +36,17 @@ fi
 echo "=== pgJDBC $(git rev-parse HEAD 2>/dev/null) leg ${LEG}: ${PGHOST}:${PGPORT}, client TLS ${CLIENT_TLS}"
 cat build.local.properties
 
-exec ./gradlew --no-daemon --console plain --warning-mode=none --init-script /opt/suite/init.gradle :postgresql:test
+# Gradle's test task stops 5 minutes before the leg's limit (init.gradle), so its JUnit files are written
+T=$(( ${LEG_TIMEOUT_SECONDS:-3600} - 300 ))
+(( T >= 60 )) || T=60
+export PGSQL3P_TEST_TASK_TIMEOUT_SECONDS=${T}
+./gradlew --no-daemon --console plain --warning-mode=none --init-script /opt/suite/init.gradle :postgresql:test 2>&1 \
+    | tee /tmp/gradle-output.log
+RC=${PIPESTATUS[0]}
+# Gradle's own files are there when the task ended normally: drop the partial ones (init.gradle)
+if compgen -G '/results/junit/TEST-*.xml' >/dev/null; then rm -f /results/junit/PARTIAL-*.xml; fi
+if grep -q 'Timeout has been exceeded' /tmp/gradle-output.log; then
+    echo "=== pgJDBC: the test task's time limit (${T}s) was reached"
+    exit 124   # reported by run-suite.sh as timed_out
+fi
+exit "${RC}"

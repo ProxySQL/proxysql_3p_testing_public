@@ -17,7 +17,7 @@ Nothing in the pgJDBC checkout is edited or removed. All settings go into files 
 | `prepare.sh` | Uses pgJDBC's test server certificate (`certdir/server`) for PostgreSQL and ProxySQL, and makes a copy of its `pg_hba.conf` with one added line for ProxySQL's health checks |
 | `compose.yml` | PostgreSQL set up by pgJDBC's own `docker/postgres-server` scripts; the `runner` service |
 | `Dockerfile` | The runner: pgJDBC's checkout on the pinned Temurin 21 JDK image, test classes compiled when the image is built |
-| `init.gradle` | Per-test timeouts run in a separate thread, and results written straight to the leg's results folder |
+| `init.gradle` | Per-test timeouts in a separate thread; results in the leg's results folder, also class by class while the tests run; the test task's own time limit |
 | `run.sh` | Writes the leg's settings and runs `./gradlew :postgresql:test` |
 
 ## How it is set up
@@ -45,7 +45,13 @@ Nothing in the pgJDBC checkout is edited or removed. All settings go into files 
   - Plain legs force `sslmode=disable`.
 - **Hangs:** pgJDBC gives every test a 5-minute timeout. `init.gradle` makes JUnit enforce it in a
   separate thread, so a test blocked on a socket fails as a timeout and the suite carries on, instead
-  of hanging until the leg's 60-minute limit. Known case: `CopyTest` used to hang through ProxySQL.
+  of hanging until the leg's 60-minute limit. Known case: `CopyTest::lockReleaseOnCancelFailure`
+  through ProxySQL.
+- **Results of a stopped run:** Gradle writes its JUnit files (`TEST-<class>.xml`) only when the test
+  task ends. `init.gradle` therefore also writes `PARTIAL-<class>.xml` as each test class finishes, and
+  ends the test task 5 minutes before the leg's limit (`run.sh` then reports the leg as `timed_out`).
+  When Gradle's own files are written, `run.sh` removes the partial ones; if the run was stopped, the
+  partial files are the results.
 
 ## Differences to expect through ProxySQL
 

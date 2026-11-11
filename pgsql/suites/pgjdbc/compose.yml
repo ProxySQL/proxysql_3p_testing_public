@@ -5,7 +5,8 @@ services:
   # wal_level=logical and two streaming replicas on ports 5433 and 5434; its certificates and pg_hba.conf
   pg:
     entrypoint: [bash, /custom/scripts/entrypoint.sh]
-    command: [postgres]
+    # connection logging as in the other legs' PostgreSQL (pgsql/docker/compose.yml), for postgresql.log
+    command: [postgres, -c, log_connections=on, -c, log_disconnections=on]
     environment:
       SSL: "yes"
       XA: "yes"

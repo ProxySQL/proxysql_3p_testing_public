@@ -114,7 +114,11 @@ leg-up.sh   start PostgreSQL 18.6 (TLS always on) ─┐
 leg-down.sh save logs and container state, remove containers, networks and volumes
 ```
 
-Every leg starts from new containers, so nothing carries over from one leg to the next.
+Every leg starts from new containers, so nothing carries over from one leg to the next. Each step has
+a time limit (PostgreSQL healthy within 120 seconds, ProxySQL's admin port within 60 seconds, the proof
+within 30 seconds, each connection attempt 10 seconds, the whole setup 5 minutes), so a hanging
+ProxySQL makes the leg fail instead of blocking the job. `leg-down.sh` removes every container of the
+leg, including one-off containers started with `docker compose run`.
 
 After a leg is ready, the suite's tests run in its runner container, with the suite's time limit.
 The leg's outcome is then one of:
@@ -123,13 +127,9 @@ The leg's outcome is then one of:
 |---|---|
 | `completed` | The tests ran to the end and left JUnit results (failing tests included) |
 | `timed_out` | The suite's time limit was reached; the results written until then are kept |
-| `no_results` | The tests ended without any JUnit results |
+| `no_results` | The tests ended without any readable JUnit results |
 | `proxysql_crashed` | ProxySQL stopped or restarted while the tests ran (a ProxySQL problem, not a setup one) |
-| `infra_failure` | The leg could not be set up (see the reason), so no tests ran | Each step has
-a time limit (PostgreSQL healthy within 120 seconds, ProxySQL's admin port within 60 seconds, the proof
-within 30 seconds, each connection attempt 10 seconds), so a hanging ProxySQL makes the leg fail
-instead of blocking the job. `leg-down.sh` removes every container of the leg, including one-off
-containers started with `docker compose run`.
+| `infra_failure` | The leg could not be set up (see the reason), so no tests ran |
 
 **TLS.** PostgreSQL always accepts TLS, and ProxySQL always accepts TLS from clients (its default), in
 every leg. Each side is then decided per leg:

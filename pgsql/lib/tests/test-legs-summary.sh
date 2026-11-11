@@ -31,10 +31,12 @@ grep -q '^| proxy-plain | infra_failure | - | - | - | - | prove connection and t
     && pass "multi-line reason is flattened and '|' escaped" || fail "reason row: ${OUT}"
 grep -q '^| no-leg-json | no leg.json |' <<< "${OUT}" && pass "a leg without leg.json is reported" || fail "missing leg.json row"
 [[ ${RC} -eq 1 && $(cat "${TMP}/err") == *"proxy-plain"* && $(cat "${TMP}/err") == *"no-leg-json"* \
+    && $(cat "${TMP}/err") == *"direct-tls"* \
     && $(cat "${TMP}/err") != *"proxy-tls"* && $(cat "${TMP}/err") != *"direct-plain"* ]] \
-    && pass "exit 1 naming only the legs whose setup failed (not test outcomes)" || fail "rc=${RC} err=$(cat "${TMP}/err")"
+    && pass "exit 1 naming the legs that failed their setup or never recorded an outcome (still 'ready')" \
+    || fail "rc=${RC} err=$(cat "${TMP}/err")"
 
-bash "${LIB}/legs-summary.sh" "${TMP}/legs" direct-plain direct-tls proxy-tls >/dev/null 2>&1; RC=$?
-[[ ${RC} -eq 0 ]] && pass "exit 0 when no leg failed its setup (completed, timed_out, ready)" || fail "rc=${RC}"
+bash "${LIB}/legs-summary.sh" "${TMP}/legs" direct-plain proxy-tls >/dev/null 2>&1; RC=$?
+[[ ${RC} -eq 0 ]] && pass "exit 0 when every leg recorded a test outcome (completed, timed_out)" || fail "rc=${RC}"
 
 exit "${FAILED}"

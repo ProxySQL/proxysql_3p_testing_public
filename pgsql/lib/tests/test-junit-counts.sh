@@ -14,6 +14,11 @@ WANT='{"total":9,"failures":3,"errors":1,"skipped":2,"files":2,"files_unreadable
 [[ ${RC} -eq 0 && $(jq -cS . <<< "${OUT}") == $(jq -cS . <<< "${WANT}") ]] \
     && pass "sums testsuite and testsuites files, counts the truncated file as unreadable" || fail "mixed (rc=${RC}: ${OUT})"
 
+OUT=$(python3 -I "${LIB}/junit-counts.py" "${FIX}/badattr"); RC=$?
+WANT='{"total":2,"failures":1,"errors":0,"skipped":0,"files":1,"files_unreadable":1}'
+[[ ${RC} -eq 0 && $(jq -cS . <<< "${OUT}") == $(jq -cS . <<< "${WANT}") ]] \
+    && pass "a file with a non-numeric count is unreadable, not a crash" || fail "badattr (rc=${RC}: ${OUT})"
+
 OUT=$(python3 -I "${LIB}/junit-counts.py" "${FIX}/empty"); RC=$?
 [[ ${RC} -eq 0 && ${OUT} == null ]] && pass "no XML gives null" || fail "empty (rc=${RC}: ${OUT})"
 

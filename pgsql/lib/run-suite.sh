@@ -86,35 +86,42 @@ for leg in "$@"; do
     printf '%s\n' "RUNNER_IMAGE=${RUNNER_IMAGE}" "UPSTREAM_DIR=${UP:-${SUITE_DIR}}" "SUITE_WORK=${SUITE_WORK}" \
         "LEG_RESULTS_DIR=${A}" > "${ENVF}"
     echo "::group::${NAME} ${leg}"
-    if SUITE_DIR="${SUITE_DIR}" SUITE_ENV_FILE="${ENVF}" CERT_DIR="${CERT_DIR}" bash "${HERE}/leg-up.sh" "${leg}" "${D}"; then
+    # leg-up's own limits add up to about 4 minutes; this is the backstop (e.g. a hung image pull)
+    if SUITE_DIR="${SUITE_DIR}" SUITE_ENV_FILE="${ENVF}" CERT_DIR="${CERT_DIR}" \
+        timeout --kill-after=30 "${PGSQL3P_LEG_UP_TIMEOUT_SECONDS:-300}" bash "${HERE}/leg-up.sh" "${leg}" "${D}"; then
         set -a
         # shellcheck source=/dev/null
         source "${D}/conn.env"
         set +a
         CLIENT_TLS=$(jq -r .client_tls "${A}/leg.json") BACKEND_TLS=$(jq -r '.backend_tls // ""' "${A}/leg.json")
         export LEG=${leg} CLIENT_TLS BACKEND_TLS
+        export LEG_TIMEOUT_SECONDS=${TIMEOUT}
         PASS=(-e PGHOST -e PGPORT -e PGDATABASE -e PGUSER -e PGPASSWORD -e PGSSLMODE -e PGCONNECT_TIMEOUT
-              -e LEG -e CLIENT_TLS -e BACKEND_TLS)
+              -e LEG -e CLIENT_TLS -e BACKEND_TLS -e LEG_TIMEOUT_SECONDS)
         for v in ${RUNNER_PASS_ENV}; do [[ -n ${!v:-} ]] && PASS+=(-e "${v}"); done
+        # no "set -e" from here to leg-down: a failing step must not skip leg-down or the later legs
         set +e
         timeout --kill-after=30 "${TIMEOUT}" docker compose --env-file "${D}/compose.env" run --rm --no-deps -T \
             "${PASS[@]}" runner > "${A}/test-output.log" 2>&1
         RC=$?
-        set -e
         own "${A}"
 
+        # 124: our time limit; a suite's run.sh may also exit 124 when its own test timeout fired
         STATUS=completed
         if [[ ${RC} -eq 124 || ${RC} -eq 137 ]]; then STATUS=timed_out; fi
-        TESTS=$(python3 -I "${HERE}/junit-counts.py" "${A}/junit")
-        [[ ${TESTS} != null || ${STATUS} == timed_out ]] || STATUS=no_results
+        TESTS=$(python3 -I "${HERE}/junit-counts.py" "${A}/junit") || TESTS=null
+        if [[ ${STATUS} != timed_out ]] && [[ ${TESTS} == null || $(jq -r .files <<< "${TESTS}") == 0 ]]; then
+            STATUS=no_results
+        fi
         if [[ $(jq -r .backend_tls "${A}/leg.json") != null ]]; then
             PX=$(docker compose --env-file "${D}/compose.env" ps -aq proxysql)
             STATE=$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "${PX}" 2>/dev/null || echo "missing 0")
             [[ ${STATE} == "true 0" ]] || STATUS=proxysql_crashed
         fi
         jq --arg s "${STATUS}" --argjson rc "${RC}" --argjson t "${TESTS}" \
-            '.status = $s | .runner_exit_code = $rc | .tests = $t' "${A}/leg.json" > "${A}/leg.json.tmp"
-        mv "${A}/leg.json.tmp" "${A}/leg.json"
+            '.status = $s | .runner_exit_code = $rc | .tests = $t' "${A}/leg.json" > "${A}/leg.json.tmp" \
+            && mv "${A}/leg.json.tmp" "${A}/leg.json" || echo "::warning::${NAME} ${leg}: could not record the outcome" >&2
+        set -e
         echo "${NAME} ${leg}: ${STATUS} (runner exit ${RC}, tests ${TESTS})"
     else
         FAILED_LEGS=$(( FAILED_LEGS + 1 ))

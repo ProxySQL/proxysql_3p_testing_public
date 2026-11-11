@@ -20,7 +20,15 @@ fail() { echo "FAIL: $1"; FAILED=1; }
 # shellcheck disable=SC2317  # called by the EXIT trap
 cleanup() { docker run --rm -v "${TMP}:/t" --entrypoint rm "${POSTGRES_IMAGE}" -rf /t/w >/dev/null 2>&1; rm -rf "${TMP}"; }
 trap cleanup EXIT
-leftovers() { docker ps -aq --filter "label=com.docker.compose.project" --filter "name=pgsql3p-" | wc -l; }
+# containers of the legs run by this test only (other runs on the machine are ignored)
+leftovers() {
+    local f n=0
+    for f in "${TMP}"/w/*/legs/*/compose.env; do
+        [[ -f ${f} ]] || continue
+        n=$(( n + $(docker ps -aq --filter "label=com.docker.compose.project=$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' "${f}")" | wc -l) ))
+    done
+    echo "${n}"
+}
 
 # run MODE LEG... -> W (work dir), RC, ELAPSED
 run() {
@@ -45,10 +53,12 @@ grep -q 'fixture: proxy-plain alice' "${W}/legs/proxy-plain/artifacts/test-outpu
     && pass "normal: runner output saved in test-output.log" || fail "normal: test-output.log"
 [[ $(leftovers) -eq 0 ]] && pass "normal: nothing left behind" || fail "normal: leftovers $(leftovers)"
 
-run sleep direct-plain
-[[ $(leg direct-plain .status) == timed_out && $(leg direct-plain .tests.total) == 1 && ${ELAPSED} -lt 180 ]] \
-    && pass "sleep: timed_out after ${ELAPSED}s, results written before the hang kept" \
+run sleep direct-plain proxy-plain
+[[ $(leg direct-plain .status) == timed_out && $(leg direct-plain .tests.total) == 1 && ${ELAPSED} -lt 300 ]] \
+    && pass "sleep: timed_out, results written before the hang kept" \
     || fail "sleep: $(leg direct-plain '{status,tests}' | tr -d '\n') after ${ELAPSED}s"
+[[ $(leg proxy-plain .status) == timed_out ]] && pass "sleep: the next leg still ran after a timed-out leg (${ELAPSED}s in total)" \
+    || fail "sleep: next leg $(leg proxy-plain '{status,reason}' | tr -d '\n')"
 [[ $(leftovers) -eq 0 ]] && pass "sleep: the killed runner is removed" || fail "sleep: leftovers $(leftovers)"
 
 run kill-proxysql proxy-plain
@@ -59,6 +69,10 @@ run kill-proxysql proxy-plain
 run no-xml direct-plain
 [[ $(leg direct-plain .status) == no_results && $(leg direct-plain .tests) == null ]] \
     && pass "no-xml: no_results" || fail "no-xml: $(leg direct-plain '{status,tests}' | tr -d '\n')"
+
+run bad-xml direct-plain
+[[ $(leg direct-plain .status) == no_results && $(leg direct-plain .tests.files_unreadable) == 1 ]] \
+    && pass "bad-xml: only unreadable JUnit is no_results, not completed" || fail "bad-xml: $(leg direct-plain '{status,tests}' | tr -d '\n')"
 
 [[ $(find "${TMP}/w" -name leg.json -newer "${SUITE}/run.sh" -exec stat -c %U {} + | sort -u) == "$(id -un)" ]] \
     && pass "artifacts are owned by the calling user" || fail "artifact ownership: $(find "${TMP}/w" -path '*artifacts*' ! -user "$(id -un)" | head -3)"

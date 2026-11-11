@@ -2,8 +2,9 @@
 # Usage: legs-summary.sh LEGS_DIR LEG...
 # Prints a Markdown table with one row per leg from LEGS_DIR/<leg>/artifacts/leg.json (for the run
 # page summary): status, test counts, reason, PostgreSQL version, backend protocol, ProxySQL config.
-# Exits 1, naming them, if any leg's setup failed (infra_failure) or a leg has no leg.json. Test
-# outcomes (completed, timed_out, no_results, proxysql_crashed) are reported, not failed on here.
+# Exits 1, naming them, if any leg's setup failed (infra_failure), a leg never recorded a test outcome
+# (still "ready": the run stopped in the middle of that leg) or a leg has no leg.json. Test outcomes
+# (completed, timed_out, no_results, proxysql_crashed) are reported, not failed on here.
 set -euo pipefail
 
 [[ $# -ge 2 ]] || { echo "::error::usage: legs-summary.sh LEGS_DIR LEG..." >&2; exit 1; }
@@ -18,10 +19,10 @@ for leg in "$@"; do
         jq -r 'def cell: tostring | gsub("[\r\n]+"; " ") | gsub("\\|"; "\\|");
             def n(k): if .tests == null then "-" else .tests[k] | cell end;
             "| \(.leg | cell) | \(.status | cell) | \(n("total")) | \(n("failures")) | \(n("errors")) | \(n("skipped")) | \(.reason // "" | cell) | \(.server_version // "-" | cell) | \(.backend_protocol // "-" | cell) | \(.proxysql_config_sha256 // "-" | cell) |"' "${F}"
-        [[ $(jq -r .status "${F}") != infra_failure ]] || FAILED+=" ${leg}"
+        case $(jq -r .status "${F}") in infra_failure | ready) FAILED+=" ${leg}" ;; esac
     else
         echo "| ${leg} | no leg.json | | | | | | | | |"
         FAILED+=" ${leg}"
     fi
 done
-[[ -z ${FAILED} ]] || { echo "::error::legs whose setup failed:${FAILED}" >&2; exit 1; }
+[[ -z ${FAILED} ]] || { echo "::error::legs whose setup failed or whose outcome was not recorded:${FAILED}" >&2; exit 1; }

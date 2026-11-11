@@ -1,15 +1,14 @@
 # PostgreSQL 3rd-party tests: run the original test suites of PostgreSQL drivers through ProxySQL and
 # directly against PostgreSQL, and compare the results.
-#   resolve      the sysown/proxysql commit (branch head, default v3.0, or an explicit full sha);
-#                only the sha is passed on, so the tested commit cannot change mid-run
-#   build        ProxySQL v4.0 at that commit, packaged once as a Docker image (pgsql-3p-build.yml)
-#   environment-check
-#                loads exactly that image, then starts, proves and stops the four standard legs
-#                (PostgreSQL directly and through ProxySQL, with and without TLS); stage 3 replaces it
-#                with the suite jobs, which use the same scripts around their tests
+#   resolve  the sysown/proxysql commit (branch head, default v3.0, or an explicit full sha); only the
+#            sha is passed on, so the tested commit cannot change mid-run. Also the suites (folders in
+#            pgsql/suites/), the legs and the artifact retention
+#   build    ProxySQL v4.0 at that commit, packaged once as a Docker image (pgsql-3p-build.yml)
+#   suite    one job per suite: loads exactly that image, then runs the suite's unmodified upstream
+#            tests in each leg (PostgreSQL directly and through ProxySQL, with and without TLS)
 # Independent of the MySQL pipeline (CI-3p.yml, 3p-build.yml, 3p-suite.yml).
 name: PostgreSQL 3rd-party tests
-run-name: "PostgreSQL 3rd-party tests ${{ inputs.proxysql_ref }}"
+run-name: "PostgreSQL 3rd-party tests ${{ inputs.proxysql_ref }}${{ inputs.suites && format(' [{0}]', inputs.suites) || '' }}"
 
 on:
   workflow_dispatch:
@@ -17,6 +16,19 @@ on:
       proxysql_ref:
         description: 'sysown/proxysql branch, or full 40-hex commit'
         default: 'v3.0'
+        type: string
+      suites:
+        description: 'comma-separated suites (folders in pgsql/suites/); empty: all'
+        default: ''
+        type: string
+      tls:
+        description: 'legs: standard (direct and ProxySQL, each with and without TLS) or full (also TLS on one side only)'
+        default: 'standard'
+        type: choice
+        options: [standard, full]
+      retention_days:
+        description: 'days the artifacts are kept (1-90); empty: repository variable PGSQL_3P_RETENTION_DAYS, else 30'
+        default: ''
         type: string
 
 # no concurrency group: runs are independent, so several commits can be tested at the same time
@@ -27,23 +39,62 @@ permissions:
 jobs:
   resolve:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
+      sha7: ${{ steps.resolve.outputs.sha7 }}
+      suites: ${{ steps.resolve.outputs.suites }}
+      legs: ${{ steps.resolve.outputs.legs }}
+      retention: ${{ steps.resolve.outputs.retention }}
     steps:
     - name: Checkout
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       with:
         persist-credentials: false
 
-    - name: Resolve the ProxySQL commit
+    - name: Resolve the ProxySQL commit, suites, legs and retention
       id: resolve
       env:
         REF: ${{ inputs.proxysql_ref }}
+        SUITES_INPUT: ${{ inputs.suites }}
+        TLS: ${{ inputs.tls }}
+        RETENTION_INPUT: ${{ inputs.retention_days }}
+        RETENTION_VAR: ${{ vars.PGSQL_3P_RETENTION_DAYS }}
       run: |
         set -euo pipefail
         SHA=$(bash pgsql/lib/resolve-ref.sh "${REF}")
         echo "commit: ${SHA}"
-        echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+        ALL=()
+        for f in pgsql/suites/*/suite.env; do ALL+=("$(basename "$(dirname "${f}")")"); done
+        WANTED=()
+        IFS=',' read -ra ITEMS <<< "${SUITES_INPUT}"
+        for s in "${ITEMS[@]}"; do
+          s=$(tr -d '[:space:]' <<< "${s}")
+          [[ -n ${s} ]] || continue
+          [[ ${s} =~ ^[a-z0-9-]+$ && " ${ALL[*]} " == *" ${s} "* ]] || { echo "::error::unknown suite '${s}' (known: ${ALL[*]})"; exit 1; }
+          WANTED+=("${s}")
+        done
+        [[ ${#WANTED[@]} -gt 0 ]] || WANTED=("${ALL[@]}")
+        SUITES=$(printf '%s\n' "${WANTED[@]}" | jq -R . | jq -sc .)
+        echo "suites: ${SUITES}"
+
+        case ${TLS} in
+          standard) LEGS="direct-plain direct-tls proxy-plain proxy-tls" ;;
+          full) LEGS="direct-plain direct-tls proxy-plain proxy-tls proxy-tls-front proxy-tls-back" ;;
+          *) echo "::error::tls must be standard or full, not '${TLS}'"; exit 1 ;;
+        esac
+        RETENTION=${RETENTION_INPUT:-${RETENTION_VAR:-30}}
+        [[ ${RETENTION} =~ ^[0-9]+$ && ${RETENTION} -ge 1 && ${RETENTION} -le 90 ]] \
+          || { echo "::error::retention must be 1-90 days, not '${RETENTION}'"; exit 1; }
+        echo "legs: ${LEGS}; retention: ${RETENTION} days"
+        {
+          echo "sha=${SHA}"
+          echo "sha7=${SHA:0:7}"
+          echo "suites=${SUITES}"
+          echo "legs=${LEGS}"
+          echo "retention=${RETENTION}"
+        } >> "$GITHUB_OUTPUT"
 
   build:
     needs: resolve
@@ -51,14 +102,19 @@ jobs:
     with:
       sha: ${{ needs.resolve.outputs.sha }}
 
-  # stage 2: the test environment of each standard leg comes up and is proven on the build of this run;
-  # stage 3 replaces this job with the suite matrix, which uses the same scripts around its tests
-  environment-check:
+  suite:
     needs: [resolve, build]
+    name: suite / ${{ matrix.suite }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 300
+    strategy:
+      # one suite failing does not stop the others
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJson(needs.resolve.outputs.suites) }}
     env:
-      LEGS: direct-plain direct-tls proxy-plain proxy-tls
+      SUITE: ${{ matrix.suite }}
+      LEGS: ${{ needs.resolve.outputs.legs }}
     steps:
     - name: Checkout
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -91,53 +147,55 @@ jobs:
           echo "- image ID: \`${IMAGE_ID}\`"
         } >> "$GITHUB_STEP_SUMMARY"
 
-    - name: Create the test certificates
-      run: bash pgsql/lib/certs.sh "${RUNNER_TEMP}/certs"
-
-    - name: Start, prove and stop each leg
+    - name: Run the suite in each leg
       env:
         PROXYSQL_IMAGE: ${{ steps.image.outputs.tag }}
+        PROXYSQL_SHA: ${{ needs.resolve.outputs.sha }}
+        PROXYSQL_VERSION: ${{ needs.build.outputs.version }}
+        PROXYSQL_IMAGE_ID: ${{ needs.build.outputs.image_id }}
       run: |
         set -uo pipefail
-        export CERT_DIR="${RUNNER_TEMP}/certs"
-        for leg in ${LEGS}; do
-          echo "::group::${leg}"
-          # a failed leg is recorded in its leg.json; the other legs still run. The timeout is a backstop:
-          # leg-up's own limits add up to about 4 minutes
-          timeout 300 bash pgsql/lib/leg-up.sh "${leg}" "legs/${leg}" || true
-          bash pgsql/lib/leg-down.sh "legs/${leg}"
-          echo "::endgroup::"
-        done
+        # setup failures are recorded (suite-status.json, leg.json) and reported by the last step
+        # shellcheck disable=SC2086  # one argument per leg
+        bash pgsql/lib/run-suite.sh "${SUITE}" work ${LEGS} || true
 
-    # always(): the logs matter most when the job was stopped, e.g. by its timeout
-    - name: Check the artifacts hold no keys or passwords
-      id: guard
+    # always(): the results matter most when the job was stopped, e.g. by its timeout
+    - name: Collect the files to upload
       if: ${{ always() }}
       run: |
         set -uo pipefail
-        : > "${RUNNER_TEMP}/no-secrets"
-        BAD=0
-        # every folder the upload below takes, not only the expected legs
-        for d in legs/*/artifacts; do
-          [[ -d ${d} ]] || continue
-          SECRETS="${d%/artifacts}/secrets"
-          [[ -f ${SECRETS} ]] || SECRETS="${RUNNER_TEMP}/no-secrets"
-          bash pgsql/lib/guard-artifacts.sh "${d}" "${SECRETS}" || BAD=1
+        mkdir -p upload/legs
+        for f in metadata.json suite-status.json runner-build.log; do
+          [[ -f work/${f} ]] && cp "work/${f}" upload/
         done
-        exit "${BAD}"
+        for d in work/legs/*/artifacts; do
+          [[ -d ${d} ]] && cp -r "${d}" "upload/legs/$(basename "$(dirname "${d}")")"
+        done
+        cat work/legs/*/secrets > "${RUNNER_TEMP}/secrets" 2>/dev/null || : > "${RUNNER_TEMP}/secrets"
 
-    - name: Upload the leg artifacts
+    - name: Check the files hold no keys or passwords
+      id: guard
+      if: ${{ always() }}
+      run: bash pgsql/lib/guard-artifacts.sh upload "${RUNNER_TEMP}/secrets"
+
+    - name: Upload the results
       if: ${{ always() && steps.guard.outcome == 'success' }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
-        name: pgsql-3p-environment-${{ needs.resolve.outputs.sha }}-attempt${{ github.run_attempt }}
-        path: legs/*/artifacts
-        retention-days: 7
+        name: pgsql-3p-${{ matrix.suite }}-${{ needs.resolve.outputs.sha7 }}-r${{ github.run_id }}-a${{ github.run_attempt }}
+        path: upload
+        retention-days: ${{ fromJson(needs.resolve.outputs.retention) }}
 
-    - name: Summary, and fail if a leg is not ready
+    - name: Summary, and fail if the suite or a leg could not be set up
       if: ${{ always() }}
       run: |
         set -uo pipefail
-        echo "### Legs" >> "$GITHUB_STEP_SUMMARY"
+        echo "### ${SUITE}" >> "$GITHUB_STEP_SUMMARY"
+        if [[ -f work/suite-status.json ]]; then
+          REASON=$(jq -r .reason work/suite-status.json)
+          echo "Suite could not start: ${REASON}" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::${SUITE}: ${REASON}"
+          exit 1
+        fi
         # shellcheck disable=SC2086  # one argument per leg
-        bash pgsql/lib/legs-summary.sh legs ${LEGS} >> "$GITHUB_STEP_SUMMARY"
+        bash pgsql/lib/legs-summary.sh work/legs ${LEGS} >> "$GITHUB_STEP_SUMMARY"

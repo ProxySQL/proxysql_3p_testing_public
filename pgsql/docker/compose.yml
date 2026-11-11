@@ -1,0 +1,75 @@
+# Test environment of one leg of the PostgreSQL 3rd-party tests. Started and stopped by
+# pgsql/lib/leg-up.sh and leg-down.sh, which pass the variables through the leg's compose.env.
+#   pg        PostgreSQL, TLS always on, identical in every leg
+#   proxysql  ProxySQL (profile "proxy", proxy legs only), defaults plus the per-leg admin settings
+#   client    psql, used to prove the connection and TLS state (profile "client")
+services:
+  pg:
+    image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE is required}
+    environment:
+      POSTGRES_PASSWORD: ${PG_SUPERUSER_PASSWORD:?PG_SUPERUSER_PASSWORD is required}
+    volumes:
+      - ${CERT_DIR:?CERT_DIR is required}:/tls-src:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    # PostgreSQL only accepts a key owned by its own user: install the certificates, then start as usual
+    entrypoint:
+      - bash
+      - -c
+      - |
+        set -e
+        install -d -o postgres -g postgres -m 0700 /var/lib/postgresql/tls
+        install -o postgres -g postgres -m 0600 /tls-src/server.key /var/lib/postgresql/tls/server.key
+        install -o postgres -g postgres -m 0644 /tls-src/server.pem /tls-src/ca.pem /var/lib/postgresql/tls/
+        exec docker-entrypoint.sh "$$@"
+      - pg-entrypoint
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/var/lib/postgresql/tls/server.pem
+      - -c
+      - ssl_key_file=/var/lib/postgresql/tls/server.key
+      - -c
+      - ssl_ca_file=/var/lib/postgresql/tls/ca.pem
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+      - -c
+      - log_connections=on
+      - -c
+      - log_disconnections=on
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, postgres]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  proxysql:
+    profiles: [proxy]
+    image: ${PROXYSQL_IMAGE:-pgsql-3p-proxysql-image-not-set}
+    depends_on:
+      pg:
+        condition: service_healthy
+    volumes:
+      - ${CERT_DIR:?CERT_DIR is required}:/tls-src:ro
+      - ./proxysql/proxysql.cnf:/etc/proxysql.cnf:ro
+    # ProxySQL reads its frontend certificate from the datadir: install the test certificates, then start
+    entrypoint:
+      - bash
+      - -c
+      - |
+        set -e
+        mkdir -p /var/lib/proxysql
+        install -m 0644 /tls-src/server.pem /var/lib/proxysql/proxysql-cert.pem
+        install -m 0600 /tls-src/server.key /var/lib/proxysql/proxysql-key.pem
+        install -m 0644 /tls-src/ca.pem /var/lib/proxysql/proxysql-ca.pem
+        exec proxysql -f -D /var/lib/proxysql
+      - proxysql-entrypoint
+
+  client:
+    profiles: [client]
+    image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE is required}
+    entrypoint: [psql]
+    volumes:
+      # the CA only: the client never sees a private key
+      - ${CERT_DIR:?CERT_DIR is required}/ca.pem:/tls/ca.pem:ro

@@ -67,7 +67,9 @@ Run workflow (proxysql_ref = v3.0)
 2. **build** checks out that commit and runs `PROXYSQL40=1 WITHGCOV=1 make ubuntu24-dbg`: ProxySQL 4.0,
    debug build, with code-coverage instrumentation, the same build the legacy pipeline uses. This is
    the slow part of a run; the job is stopped after 180 minutes. The `.deb` package it produces is
-   installed into a Docker image based on the pinned `ubuntu:24.04` image. The job then checks that
+   installed into a Docker image based on the pinned `ubuntu:24.04` image. That image build has no
+   network access and downloads nothing: the image is exactly the pinned base image plus the ProxySQL
+   package, whose only dependency (`libgnutls30`) is already in the base image. The job then checks that
    `proxysql --version` inside the image is `4.0.x` and contains the first 7 characters of the commit,
    and uploads the image and the build log.
 3. **environment-check** runs on a different machine. It downloads the image, loads it, and fails if
@@ -128,6 +130,10 @@ changed, through the admin interface:
 - one server in `pgsql_servers`: `pg:5432` in hostgroup 0, with `use_ssl` as above;
 - `pgsql-server_version` set to the real PostgreSQL version, because ProxySQL's default (`16.1`) would
   mislead drivers about what the server supports.
+
+The admin interface is reached with `psql` over ProxySQL's PostgreSQL admin port (6132), from a
+container that shares ProxySQL's network, because the default `admin` login is only accepted from
+`127.0.0.1`. So the ProxySQL image needs no extra client.
 
 Nothing else is changed. ProxySQL's health checks use their default login, `monitor` / `monitor`, so
 that user is created in PostgreSQL instead. The tests focus on ProxySQL's **native** PostgreSQL backend
@@ -205,7 +211,7 @@ docker run --rm --entrypoint proxysql pgsql-3p-proxysql:<commit> --version
 | `not a v4.0 build: '...'` | The build did not produce ProxySQL 4.0 (for example, a changed Makefile flag) |
 | `version '...' is not commit ...` | The binary was not built from the requested commit |
 | `expected exactly one proxysql_*.deb in ...` | The build produced no package, or more than one |
-| `docker build of ... failed after 3 attempts` | The runtime image could not be built, usually because Ubuntu's package servers could not be reached (`Temporary failure resolving 'archive.ubuntu.com'`). Each download is retried by apt, and the whole image build is tried 3 times with a pause; if it still fails, use **Re-run failed jobs** |
+| `docker build of ... failed after 3 attempts` | The runtime image could not be built, 3 times in a row. The image build downloads nothing (it runs without network access), so look for a problem with the base image or the `.deb` in the step's log |
 | `image ... has ID ..., expected ...` | A job loaded a different image than the build produced (wrong or stale artifact); re-run the whole workflow |
 | `legs not ready: ...` | At least one leg's setup failed; the summary table and that leg's `leg.json` give the step and the reason |
 | `<leg>: infra_failure: start postgresql: ...` | PostgreSQL did not start or did not become healthy within 120 seconds; see `postgresql.log` |
@@ -247,7 +253,7 @@ To bring up one leg by hand and look around:
 ```bash
 bash pgsql/lib/certs.sh /tmp/pgsql3p-certs
 CERT_DIR=/tmp/pgsql3p-certs PROXYSQL_IMAGE=pgsql-3p-proxysql:<commit> bash pgsql/lib/leg-up.sh proxy-tls /tmp/leg
-docker compose --env-file /tmp/leg/compose.env exec proxysql mysql -h127.0.0.1 -P6032 -uadmin -padmin
+docker compose --env-file /tmp/leg/compose.env run --rm admin -h 127.0.0.1 -p 6132 -U admin -d admin
 bash pgsql/lib/leg-down.sh /tmp/leg
 ```
 

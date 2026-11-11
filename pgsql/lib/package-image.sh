@@ -24,11 +24,11 @@ trap 'rm -rf "${CTX}"' EXIT
 cp "${HERE}/../docker/proxysql/Dockerfile" "${CTX}/Dockerfile"
 cp "${DEBS[0]}" "${CTX}/proxysql.deb"
 
-# --network=host: some developer machines' Docker build network has no egress for apt; harmless on runners.
-# Up to 3 attempts: a short network or DNS failure during apt must not throw away the ProxySQL build.
+# --network=none: nothing in the image is downloaded while building it (reproducible, and immune to
+# network or DNS failures). Up to 3 attempts, e.g. for a failed pull of the base image.
 DELAY=${PGSQL3P_RETRY_DELAY:-30}
 for attempt in 1 2 3; do
-    docker build --network=host --build-arg "UBUNTU_IMAGE=${UBUNTU_IMAGE}" -t "${TAG}" "${CTX}" >&2 && break
+    docker build --network=none --build-arg "UBUNTU_IMAGE=${UBUNTU_IMAGE}" -t "${TAG}" "${CTX}" >&2 && break
     [[ ${attempt} -lt 3 ]] || die "docker build of ${TAG} failed after 3 attempts"
     echo "::warning::docker build attempt ${attempt} failed, retrying in $(( DELAY * attempt ))s" >&2
     sleep $(( DELAY * attempt ))

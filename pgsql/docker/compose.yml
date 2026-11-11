@@ -2,6 +2,7 @@
 # pgsql/lib/leg-up.sh and leg-down.sh, which pass the variables through the leg's compose.env.
 #   pg        PostgreSQL, TLS always on, identical in every leg
 #   proxysql  ProxySQL (profile "proxy", proxy legs only), defaults plus the per-leg admin settings
+#   admin     psql to ProxySQL's PostgreSQL admin port (profile "admin")
 #   client    psql, used to prove the connection and TLS state (profile "client")
 services:
   pg:
@@ -65,6 +66,16 @@ services:
         install -m 0644 /tls-src/ca.pem /var/lib/proxysql/proxysql-ca.pem
         exec proxysql -f -D /var/lib/proxysql
       - proxysql-entrypoint
+
+  # psql to ProxySQL's admin interface over its PostgreSQL protocol port (6132), from inside ProxySQL's
+  # network namespace: the default admin:admin login is only accepted from 127.0.0.1
+  admin:
+    profiles: [admin]
+    image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE is required}
+    network_mode: service:proxysql
+    entrypoint: [psql]
+    environment:
+      PGPASSWORD: admin
 
   client:
     profiles: [client]

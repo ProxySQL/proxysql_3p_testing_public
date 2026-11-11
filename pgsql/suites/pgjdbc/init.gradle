@@ -1,0 +1,12 @@
+// Applied by run.sh with --init-script. It changes how pgJDBC's tests are run, not what they test.
+allprojects {
+    tasks.withType(Test).configureEach {
+        // pgJDBC already sets a 5-minute timeout per test (junit.jupiter.execution.timeout.default).
+        // Enforced in a separate thread, a test blocked on a socket then fails as a timeout instead of
+        // hanging the whole suite.
+        systemProperty 'junit.jupiter.execution.timeout.thread.mode.default', 'SEPARATE_THREAD'
+        // write results straight to the leg's results folder, so they survive if the runner is stopped
+        reports.junitXml.outputLocation.set(new File('/results/junit'))
+        reports.html.outputLocation.set(new File('/results/upstream-html'))
+    }
+}

@@ -1,0 +1,4 @@
+# ProxySQL bootstrap config for the PostgreSQL 3rd-party tests: everything at ProxySQL's defaults.
+# The packaged /etc/proxysql.cnf sets non-default MySQL values, so it is replaced by this file.
+# Per-leg settings (users, the server, server_version) are applied over the admin port by leg-up.sh.
+datadir="/var/lib/proxysql"

@@ -27,6 +27,7 @@ chmod 0644 "${DIR}/ca.pem" "${DIR}/server.pem"
 
 for c in ca server; do
     echo "== ${c}.pem"
-    openssl x509 -in "${DIR}/${c}.pem" -noout -subject -issuer -dates -ext subjectAltName -fingerprint -sha256
+    # stderr: "No extensions in certificate" for the CA (no SAN); failures still stop the script
+    openssl x509 -in "${DIR}/${c}.pem" -noout -subject -issuer -dates -ext subjectAltName -fingerprint -sha256 2>/dev/null
 done > "${DIR}/cert-metadata.txt"
 chmod 0644 "${DIR}/cert-metadata.txt"

@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2015  # pass() always succeeds, so "cond && pass || fail" is a safe if/else
+# Tests for leg-up.sh, prove-tls.sh and leg-down.sh: every leg comes up ready with the right TLS state,
+# wrong TLS expectations fail, a missing image is an infra_failure, and nothing is left behind.
+# Needs docker, jq, openssl and a local ProxySQL image named in PROXYSQL_IMAGE (see pgsql/README.md).
+set -uo pipefail
+
+LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -z ${PROXYSQL_IMAGE:-} ]] || ! docker image inspect "${PROXYSQL_IMAGE}" >/dev/null 2>&1; then
+    echo "FAIL: set PROXYSQL_IMAGE to a local ProxySQL image (pgsql/README.md, 'Testing the scripts locally')"
+    exit 1
+fi
+TMP=$(mktemp -d)
+FAILED=0
+pass() { echo "PASS: $1"; }
+fail() { echo "FAIL: $1"; FAILED=1; }
+
+# shellcheck disable=SC2317  # called by the EXIT trap
+cleanup() {
+    for d in "${TMP}"/*/; do [[ -f ${d}compose.env ]] && bash "${LIB}/leg-down.sh" "${d%/}" >/dev/null 2>&1; done
+    rm -rf "${TMP}"
+}
+trap cleanup EXIT
+
+export CERT_DIR="${TMP}/certs"
+bash "${LIB}/certs.sh" "${CERT_DIR}" >/dev/null || { echo "FAIL: certs.sh"; exit 1; }
+
+field() { jq -r "$2" "$1/artifacts/leg.json" 2>/dev/null; }
+project() { sed -n 's/^COMPOSE_PROJECT_NAME=//p' "$1/compose.env"; }
+leftovers() {
+    local f="label=com.docker.compose.project=$1"
+    { docker ps -aq --filter "${f}"; docker network ls -q --filter "${f}"; docker volume ls -q --filter "${f}"; } | wc -l
+}
+
+# check_leg LEG CLIENT_TLS BACKEND_TLS SSLMODE  (BACKEND_TLS "null" for direct legs)
+check_leg() {
+    local leg=$1 ctls=$2 btls=$3 mode=$4 d="${TMP}/$1" rc p
+    if [[ ${leg} == direct-* ]]; then
+        env -u PROXYSQL_IMAGE bash "${LIB}/leg-up.sh" "${leg}" "${d}" >"${TMP}/${leg}.out" 2>&1; rc=$?
+    else
+        bash "${LIB}/leg-up.sh" "${leg}" "${d}" >"${TMP}/${leg}.out" 2>&1; rc=$?
+    fi
+    [[ ${rc} -eq 0 && $(field "${d}" .status) == ready && $(field "${d}" .client_tls) == "${ctls}" \
+        && $(field "${d}" .backend_tls) == "${btls}" && $(field "${d}" .server_version) == 18.6* ]] \
+        && pass "${leg}: ready, client_tls=${ctls} backend_tls=${btls}, server 18.6" \
+        || fail "${leg}: leg-up rc=${rc} leg.json=$(cat "${d}/artifacts/leg.json" 2>/dev/null) out=$(tail -n5 "${TMP}/${leg}.out")"
+
+    grep -qx "PGSSLMODE=${mode}" "${d}/conn.env" 2>/dev/null && pass "${leg}: conn.env PGSSLMODE=${mode}" \
+        || fail "${leg}: conn.env PGSSLMODE (want ${mode})"
+
+    if [[ ${leg} == proxy-* ]]; then
+        [[ $(field "${d}" .backend_protocol) == native && $(field "${d}" .proxysql_config_sha256) =~ ^[0-9a-f]{64}$ ]] \
+            && grep -qE '^pgsql-use_native_backend_protocol[[:space:]]+true$' "${d}/artifacts/proxysql-config.txt" \
+            && pass "${leg}: native backend protocol, config dumped and fingerprinted" \
+            || fail "${leg}: backend protocol / config dump"
+    fi
+
+    bash "${LIB}/guard-artifacts.sh" "${d}/artifacts" "${d}/secrets" >/dev/null 2>&1 \
+        && pass "${leg}: artifacts hold no keys or passwords" || fail "${leg}: guard found secrets in artifacts"
+
+    case ${leg} in
+        proxy-plain) bash "${LIB}/prove-tls.sh" "${d}" 0 1 >/dev/null 2>&1 \
+            && fail "proxy-plain: proof expecting backend TLS passed" || pass "proxy-plain: proof expecting backend TLS fails" ;;
+        direct-tls) bash "${LIB}/prove-tls.sh" "${d}" 1 0 >/dev/null 2>&1 \
+            && fail "direct-tls: proof expecting no TLS passed" || pass "direct-tls: proof expecting no TLS fails" ;;
+    esac
+
+    p=$(project "${d}")
+    bash "${LIB}/leg-down.sh" "${d}" >/dev/null 2>&1; rc=$?
+    local logs_ok=1
+    [[ -s ${d}/artifacts/postgresql.log ]] || logs_ok=0
+    [[ ${leg} == direct-* || -s ${d}/artifacts/proxysql.log ]] || logs_ok=0
+    [[ ${rc} -eq 0 && -n ${p} && $(leftovers "${p}") -eq 0 && ${logs_ok} -eq 1 && $(field "${d}" .ended_at) != null ]] \
+        && pass "${leg}: leg-down collects logs and leaves nothing behind" \
+        || fail "${leg}: leg-down rc=${rc} project='${p}' leftovers=$(leftovers "${p}") logs_ok=${logs_ok}"
+    rm -f "${d}/compose.env"
+}
+
+check_leg direct-plain    0 null disable
+check_leg direct-tls      1 null verify-full
+check_leg proxy-plain     0 0    disable
+check_leg proxy-tls       1 1    verify-full
+check_leg proxy-tls-front 1 0    verify-full
+check_leg proxy-tls-back  0 1    disable
+
+# forced setup failure: the ProxySQL image does not exist
+D="${TMP}/missing-image"
+START=$(date +%s)
+PROXYSQL_IMAGE=pgsql-3p-no-such-image:none timeout 180 bash "${LIB}/leg-up.sh" proxy-plain "${D}" >"${TMP}/missing.out" 2>&1; RC=$?
+ELAPSED=$(( $(date +%s) - START ))
+[[ ${RC} -eq 1 && $(field "${D}" .status) == infra_failure && $(field "${D}" .reason) == *proxysql* ]] \
+    && pass "missing ProxySQL image: infra_failure after ${ELAPSED}s, reason names proxysql" \
+    || fail "missing image: rc=${RC} leg.json=$(cat "${D}/artifacts/leg.json" 2>/dev/null)"
+P=$(project "${D}" 2>/dev/null)
+bash "${LIB}/leg-down.sh" "${D}" >/dev/null 2>&1; RC=$?
+[[ ${RC} -eq 0 && -n ${P} && $(leftovers "${P}") -eq 0 ]] && pass "missing image: leg-down cleans up" \
+    || fail "missing image: leg-down rc=${RC} leftovers=$(leftovers "${P}")"
+rm -f "${D}/compose.env"
+
+bash "${LIB}/leg-up.sh" no-such-leg "${TMP}/bad" >/dev/null 2>&1; RC=$?
+[[ ${RC} -eq 1 ]] && pass "unknown leg name fails" || fail "unknown leg (rc=${RC})"
+
+exit "${FAILED}"

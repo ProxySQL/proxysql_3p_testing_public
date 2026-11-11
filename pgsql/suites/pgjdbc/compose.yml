@@ -1,0 +1,33 @@
+# pgJDBC's PostgreSQL setup and runner, on top of pgsql/docker/compose.yml (see pgsql/lib/leg-up.sh).
+services:
+  # pgJDBC's own server setup (docker/postgres-server of the upstream checkout): users test/test and
+  # postgres, databases test, test_2, hostdb and the SSL databases, hstore, sslinfo, XA, SCRAM,
+  # wal_level=logical and two streaming replicas on ports 5433 and 5434; its certificates and pg_hba.conf
+  pg:
+    entrypoint: [bash, /custom/scripts/entrypoint.sh]
+    # connection logging as in the other legs' PostgreSQL (pgsql/docker/compose.yml), for postgresql.log
+    command: [postgres, -c, log_connections=on, -c, log_disconnections=on]
+    environment:
+      SSL: "yes"
+      XA: "yes"
+      SCRAM: "yes"
+      CREATE_REPLICAS: "yes"
+      TZ: Etc/UTC
+      FSYNC: "no"
+      SYNC_COMMIT: "yes"
+      FULL_PAGE_WRITES: "no"
+      AUTO_VACUUM: "no"
+      TRACK_COUNTS: "no"
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - ${UPSTREAM_DIR:?UPSTREAM_DIR is required}/docker/postgres-server/scripts:/custom/scripts:ro
+      - ${SUITE_WORK:?SUITE_WORK is required}/certdir-server:/custom/certdir:ro
+
+  runner:
+    profiles: [runner]
+    image: ${RUNNER_IMAGE:?RUNNER_IMAGE is required}
+    network_mode: service:${LEG_TARGET:-pg}
+    volumes:
+      - ${LEG_RESULTS_DIR:?LEG_RESULTS_DIR is required}:/results

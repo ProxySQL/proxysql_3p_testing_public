@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.example.ATest" tests="3" skipped="1" failures="1" errors="0" timestamp="2026-11-11T00:00:00" hostname="h" time="0.5">
+  <testcase name="ok" classname="org.example.ATest" time="0.1"/>
+  <testcase name="bad" classname="org.example.ATest" time="0.1"><failure message="x">boom</failure></testcase>
+  <testcase name="skip" classname="org.example.ATest" time="0.0"><skipped/></testcase>
+</testsuite>

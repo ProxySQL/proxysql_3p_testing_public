@@ -1,0 +1,12 @@
+# Compose override of the minimal test suite: PostgreSQL also runs the suite's init script.
+services:
+  pg:
+    volumes:
+      - ${SUITE_DIR:?SUITE_DIR is required}/initdb:/docker-entrypoint-initdb.d:ro
+
+  runner:
+    profiles: [runner]
+    image: ${RUNNER_IMAGE:?RUNNER_IMAGE is required}
+    network_mode: service:${LEG_TARGET:-pg}
+    volumes:
+      - ${LEG_RESULTS_DIR:?LEG_RESULTS_DIR is required}:/results

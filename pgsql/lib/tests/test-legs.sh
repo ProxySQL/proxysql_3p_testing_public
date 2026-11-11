@@ -97,6 +97,31 @@ check_leg proxy-tls       1 1    verify-full
 check_leg proxy-tls-front 1 0    verify-full
 check_leg proxy-tls-back  0 1    disable
 
+# suite mode: the suite's PostgreSQL setup, users and database, and a shared network (PGHOST=localhost)
+SUITE="${LIB}/tests/fixtures/suite-min"
+# what run-suite.sh passes for the suite's compose.yml (its runner is not started here)
+printf '%s\n' "RUNNER_IMAGE=unused" "LEG_RESULTS_DIR=${TMP}/unused" > "${TMP}/suite.env"
+for leg in direct-plain proxy-tls; do
+    D="${TMP}/suite-${leg}"
+    SUITE_DIR="${SUITE}" SUITE_ENV_FILE="${TMP}/suite.env" bash "${LIB}/leg-up.sh" "${leg}" "${D}" >"${TMP}/suite-${leg}.out" 2>&1; RC=$?
+    WANT_PORT=$([[ ${leg} == proxy-* ]] && echo 6133 || echo 5432)
+    [[ ${RC} -eq 0 && $(field "${D}" .status) == ready ]] && grep -qx PGHOST=localhost "${D}/conn.env" \
+        && grep -qx PGUSER=alice "${D}/conn.env" && grep -qx PGDATABASE=alicedb "${D}/conn.env" \
+        && grep -qx "PGPORT=${WANT_PORT}" "${D}/conn.env" \
+        && pass "suite ${leg}: ready, conn.env localhost:${WANT_PORT} as alice@alicedb" \
+        || fail "suite ${leg}: rc=${RC} leg.json=$(cat "${D}/artifacts/leg.json" 2>/dev/null) out=$(tail -n3 "${TMP}/suite-${leg}.out")"
+    if [[ ${leg} == proxy-* ]]; then
+        ADMIN=(docker compose --env-file "${D}/compose.env" run --rm --no-deps -T admin -h 127.0.0.1 -p 6132 -U admin -d admin -XqtA)
+        USERS=$("${ADMIN[@]}" -c "SELECT username FROM runtime_pgsql_users ORDER BY username" 2>/dev/null | sort -u | paste -sd,)
+        CREATED=$("${ADMIN[@]}" -c "SELECT variable_value FROM stats_pgsql_global WHERE variable_name = 'Client_Connections_created'" 2>/dev/null)
+        [[ ${USERS} == alice && ${CREATED:-0} -gt 0 ]] \
+            && pass "suite ${leg}: ProxySQL has only the suite's user, and the proof went through ProxySQL (${CREATED} client connections)" \
+            || fail "suite ${leg}: users='${USERS}' client connections='${CREATED}'"
+    fi
+    P=$(project "${D}"); bash "${LIB}/leg-down.sh" "${D}" >/dev/null 2>&1; rm -f "${D}/compose.env"
+    [[ $(leftovers "${P}") -eq 0 ]] || fail "suite ${leg}: leftovers"
+done
+
 # forced setup failure: the ProxySQL image does not exist
 D="${TMP}/missing-image"
 START=$(date +%s)
@@ -111,6 +136,15 @@ bash "${LIB}/leg-down.sh" "${D}" >/dev/null 2>&1; RC=$?
 [[ ${RC} -eq 0 && -n ${P} && $(leftovers "${P}") -eq 0 ]] && pass "missing image: leg-down cleans up" \
     || fail "missing image: leg-down rc=${RC} leftovers=$(leftovers "${P}")"
 rm -f "${D}/compose.env"
+
+# stopped from outside (run-suite.sh's time limit on the whole setup): still recorded as infra_failure
+D="${TMP}/stopped"
+timeout 3 bash "${LIB}/leg-up.sh" proxy-plain "${D}" >/dev/null 2>&1; RC=$?
+[[ ${RC} -eq 124 && $(field "${D}" .status) == infra_failure && $(field "${D}" .reason) == *"stopped (time limit)"* ]] \
+    && pass "setup stopped by a time limit is recorded as infra_failure ($(field "${D}" .reason))" \
+    || fail "stopped setup: rc=${RC} leg.json=$(cat "${D}/artifacts/leg.json" 2>/dev/null)"
+P=$(project "${D}" 2>/dev/null); bash "${LIB}/leg-down.sh" "${D}" >/dev/null 2>&1; rm -f "${D}/compose.env"
+[[ -z ${P} || $(leftovers "${P}") -eq 0 ]] || fail "stopped setup: leftovers"
 
 bash "${LIB}/leg-up.sh" no-such-leg "${TMP}/bad" >/dev/null 2>&1; RC=$?
 [[ ${RC} -eq 1 ]] && pass "unknown leg name fails" || fail "unknown leg (rc=${RC})"

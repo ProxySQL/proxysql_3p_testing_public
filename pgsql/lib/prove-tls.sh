@@ -17,11 +17,13 @@ source "${LEG_DIR}/conn.env"
 set +a
 if [[ ${CLIENT_TLS} == 1 ]]; then PGSSLMODE=verify-full; else PGSSLMODE=disable; fi
 WANT=$([[ ${EXPECT_SSL} == 1 ]] && echo t || echo f)
+# client-shared (suite NETWORK_MODE=shared) runs in the target's network and connects to localhost
+SERVICE=$(sed -n 's/^CLIENT_SERVICE=//p' "${LEG_DIR}/compose.env")
 
 # PGCONNECT_TIMEOUT (conn.env) bounds the connection; timeout is the backstop if psql itself hangs
 OUT=$(timeout 30 docker compose --env-file "${LEG_DIR}/compose.env" run --rm --no-deps -T \
     -e PGHOST -e PGPORT -e PGDATABASE -e PGUSER -e PGPASSWORD -e PGSSLMODE -e PGSSLROOTCERT -e PGCONNECT_TIMEOUT \
-    client -XtA -v ON_ERROR_STOP=1 -c "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()" 2>&1) \
+    "${SERVICE:-client}" -XtA -v ON_ERROR_STOP=1 -c "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()" 2>&1) \
     || die "connection to ${PGHOST}:${PGPORT} with sslmode=${PGSSLMODE} failed: ${OUT}"
 GOT=$(tail -n1 <<< "${OUT}")
 [[ ${GOT} == "${WANT}" ]] || die "pg_stat_ssl.ssl is '${GOT}', expected '${WANT}' (${PGHOST}:${PGPORT}, sslmode=${PGSSLMODE})"

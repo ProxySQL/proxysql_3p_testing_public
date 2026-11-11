@@ -8,10 +8,9 @@ It is separate from the existing MySQL/legacy pipeline (`CI-3p.yml`, `3p-build.y
 which is not changed. The PostgreSQL suites that the legacy pipeline runs keep running until this
 pipeline has a replacement for each of them.
 
-**Status: stage 2.** The pipeline builds ProxySQL, proves that every later job gets exactly that
-build, and starts the test environment (PostgreSQL directly and through ProxySQL, with and without
-TLS) on it. No test suites run yet; they are added in later stages (see
-[What comes next](#what-comes-next)).
+**Status: stage 3.** The pipeline builds ProxySQL and runs the first test suite, pgJDBC, unmodified,
+directly against PostgreSQL and through ProxySQL, with and without TLS. Each leg's JUnit results and
+logs are kept. Comparing the results and reports come next (see [What comes next](#what-comes-next)).
 
 ## What stage 1 adds
 
@@ -45,6 +44,16 @@ TLS) on it. No test suites run yet; they are added in later stages (see
 The workflows only call the scripts, so everything except the real ProxySQL build can be tested on a
 developer machine.
 
+## What stage 3 adds
+
+| File | Purpose |
+|---|---|
+| `pgsql/suites/<suite>/` | One folder per test suite (see [Adding a suite](#adding-a-suite)); the first is `pgjdbc` |
+| `pgsql/lib/fetch-suite.sh` | Downloads a suite's upstream tests at its pinned commit, and refuses any other commit |
+| `pgsql/lib/run-suite.sh` | Runs one suite in each leg: tests, time limit, outcome, test counts, `metadata.json` |
+| `pgsql/lib/junit-counts.py` | Adds up the tests, failures, errors and skips of a leg's JUnit files |
+| `pgsql/lib/tests/fixtures/` | A minimal suite and sample JUnit files used by the tests |
+
 ## How a run works
 
 ```
@@ -56,9 +65,10 @@ Run workflow (proxysql_ref = v3.0)
   │               check: version is 4.0.x and matches the commit
   │               upload: image file + build log
   │
-  └─ environment-check   download and load the image in a fresh job
-                         check: same image ID, same version, same commit as the build reported
-                         then, for each of the four standard legs: start → prove → save logs → stop
+  └─ suite / <suite>   one job per suite, in parallel
+                       download and load the image; check: same image ID, version and commit
+                       get the suite's upstream tests at their pinned commit, build its test runner
+                       for each leg: start → prove → run the tests → save results and logs → stop
 ```
 
 1. **resolve** looks up the newest commit of the branch you gave (default `v3.0`) in
@@ -72,12 +82,13 @@ Run workflow (proxysql_ref = v3.0)
    package, whose only dependency (`libgnutls30`) is already in the base image. The job then checks that
    `proxysql --version` inside the image is `4.0.x` and contains the first 7 characters of the commit,
    and uploads the image and the build log.
-3. **environment-check** runs on a different machine. It downloads the image, loads it, and fails if
-   its image ID, version or commit differ from what the build reported. It then brings up each of the
-   four standard legs (see [How a leg works](#how-a-leg-works)), proves it, saves its logs and removes
-   it. The job fails if any leg is not ready. Its summary on the run page shows the image and one row
-   per leg. In stage 3 this job is replaced by the test-suite jobs, which use the same scripts around
-   their tests.
+3. **suite** runs once per suite, each on its own machine; one suite failing does not stop the
+   others. It downloads the image, loads it, and fails if its image ID, version or commit differ from
+   what the build reported. It downloads the suite's original tests at the exact pinned commit, builds
+   the suite's test runner, and then runs the tests once per leg (see
+   [How a leg works](#how-a-leg-works)). Its summary on the run page shows the image and, per leg, the
+   outcome and the number of tests, failures, errors and skipped tests. The job turns red only when the
+   suite or a leg could not be set up; failing tests are results, not job failures.
 
 ## How a leg works
 
@@ -105,9 +116,20 @@ leg-down.sh save logs and container state, remove containers, networks and volum
 
 Every leg starts from new containers, so nothing carries over from one leg to the next. Each step has
 a time limit (PostgreSQL healthy within 120 seconds, ProxySQL's admin port within 60 seconds, the proof
-within 30 seconds, each connection attempt 10 seconds), so a hanging ProxySQL makes the leg fail
-instead of blocking the job. `leg-down.sh` removes every container of the leg, including one-off
-containers started with `docker compose run`.
+within 30 seconds, each connection attempt 10 seconds, the whole setup 5 minutes), so a hanging
+ProxySQL makes the leg fail instead of blocking the job. `leg-down.sh` removes every container of the
+leg, including one-off containers started with `docker compose run`.
+
+After a leg is ready, the suite's tests run in its runner container, with the suite's time limit.
+The leg's outcome is then one of:
+
+| Outcome | Meaning |
+|---|---|
+| `completed` | The tests ran to the end and left JUnit results (failing tests included) |
+| `timed_out` | The suite's time limit was reached; the results written until then are kept |
+| `no_results` | The tests ended without any readable JUnit results |
+| `proxysql_crashed` | ProxySQL stopped or restarted while the tests ran (a ProxySQL problem, not a setup one) |
+| `infra_failure` | The leg could not be set up (see the reason), so no tests ran |
 
 **TLS.** PostgreSQL always accepts TLS, and ProxySQL always accepts TLS from clients (its default), in
 every leg. Each side is then decided per leg:
@@ -122,6 +144,11 @@ is encrypted (`pg_stat_ssl`). For direct legs, that is the client's own connecti
 it is ProxySQL's connection to PostgreSQL. A leg whose TLS is not what it should be on either side
 does not count as ready. A test certificate authority is created once per job; PostgreSQL and ProxySQL
 use the same server certificate, valid for `pg`, `proxysql`, `localhost` and `127.0.0.1`.
+
+**In suite mode** (`run-suite.sh` passes the suite folder), a leg uses the suite's own PostgreSQL
+setup (its `compose.yml`), registers the suite's users in ProxySQL instead of the `pgsql3p` user, and,
+for suites with `NETWORK_MODE=shared`, runs the proof and the tests in the target's network, so they
+connect to `localhost` (needed when a suite's certificate is only valid for `localhost`).
 
 **ProxySQL settings.** ProxySQL runs with its default settings. Per leg, only what the setup needs is
 changed, through the admin interface:
@@ -150,12 +177,16 @@ The workflow only runs when started by hand. It never starts on its own, on push
 
 1. Open the repository on GitHub and go to **Actions**.
 2. Select **PostgreSQL 3rd-party tests** on the left.
-3. Click **Run workflow**, keep or change `proxysql_ref`, and click the green **Run workflow** button.
+3. Click **Run workflow**, keep or change the inputs, and click the green **Run workflow** button.
 
-`proxysql_ref` accepts a `sysown/proxysql` branch name (for example `v3.0`) or a full, lowercase
-40-character commit. Short commits and tags are not accepted.
+| Input | Default | Meaning |
+|---|---|---|
+| `proxysql_ref` | `v3.0` | A `sysown/proxysql` branch name, or a full, lowercase 40-character commit (no short commits or tags) |
+| `suites` | all | Comma-separated suite names (folders in `pgsql/suites/`), for example `pgjdbc` |
+| `tls` | `standard` | `standard`: the four standard legs; `full`: also the two legs with TLS on one side only |
+| `retention_days` | 30 | How long the suite artifacts are kept, 1 to 90 days (default from the repository variable `PGSQL_3P_RETENTION_DAYS` if set) |
 
-From the command line: `gh workflow run pgsql-3p.yml -f proxysql_ref=v3.0`.
+From the command line: `gh workflow run pgsql-3p.yml -f proxysql_ref=v3.0 -f suites=pgjdbc`.
 
 To run a version of the workflow from another branch of this repository (for example, to try a change
 before merging), choose that branch in the **Use workflow from** list, or add `--ref <branch>` to the
@@ -166,20 +197,28 @@ Several runs can go at the same time, for example to test several ProxySQL commi
 ## Results and downloads
 
 Open a run from the **Actions** tab. The page shows each job with its steps and logs, the summary of
-`image-check` (ProxySQL version and image ID), and an **Artifacts** section at the bottom with the
-files the run produced:
+each suite job (ProxySQL version and image ID, and one row per leg with its outcome and test counts),
+and an **Artifacts** section at the bottom with the files the run produced:
 
 | Artifact | Contents | Kept for |
 |---|---|---|
 | `pgsql-3p-proxysql-image-<commit>` | `proxysql-image.tar.zst`, the ProxySQL runtime image | 3 days |
 | `pgsql-3p-build-log-<commit>-attempt<n>` | `build.log`, the full build output (one per attempt, so a re-run keeps the earlier log) | 7 days |
-| `pgsql-3p-environment-<commit>-attempt<n>` | One folder per leg with the files below | 7 days |
+| `pgsql-3p-<suite>-<commit7>-r<run>-a<attempt>` | One per suite: `metadata.json`, `runner-build.log`, and `legs/<leg>/` with the files below | `retention_days` (30) |
 
-Each leg folder (`<leg>/artifacts/`) holds:
+`metadata.json` records what was tested with what: the ProxySQL commit, version and image, the
+PostgreSQL image, the suite's upstream repository, tag and verified commit, the runner image, this
+repository's commit, the GitHub runner image, the Docker version, start and end times, and each leg's
+TLS settings, outcome and test counts. If the suite could not start, `suite-status.json` says why.
+
+Each leg folder (`legs/<leg>/`) holds:
 
 | File | Contents |
 |---|---|
-| `leg.json` | Leg name, TLS settings, status and reason, start and end time, images, PostgreSQL version, backend protocol, ProxySQL config fingerprint |
+| `leg.json` | Leg name, TLS settings, outcome and reason, start and end time, images, PostgreSQL version, backend protocol, ProxySQL config fingerprint, the runner's exit code and the test counts |
+| `junit/` | The suite's JUnit XML results, as the suite wrote them |
+| `upstream-html/` | The suite's own HTML report, if it makes one |
+| `test-output.log` | Everything the test runner printed |
 | `tls-proof.txt` | The result of the connection and TLS proof |
 | `postgresql.log`, `proxysql.log` | Container logs, with timestamps |
 | `postgresql-settings.txt` | PostgreSQL's settings (`SHOW ALL`) |
@@ -202,6 +241,29 @@ zstd -dc proxysql-image.tar.zst | docker load
 docker run --rm --entrypoint proxysql pgsql-3p-proxysql:<commit> --version
 ```
 
+## Suites
+
+### Adding a suite
+
+A suite is a folder `pgsql/suites/<name>/`. Adding the folder is enough: the workflow finds it.
+
+| File | Required | Contents |
+|---|---|---|
+| `suite.env` | yes | `UPSTREAM_REPO`, `UPSTREAM_REF` (tag), `UPSTREAM_SHA` (the exact commit; any other commit is refused), `PROXYSQL_USERS` (`user:password` pairs the tests log in with; the first is used for the connection proof), `SUITE_DATABASE`, `NETWORK_MODE` (`shared` if the tests must connect to `localhost`), `LEG_TIMEOUT_MINUTES` |
+| `Dockerfile` | yes | The test runner image. Build context: the upstream checkout; the suite folder is available as the build context `suite`. Base images pinned by digest (see `pgsql/versions.env`) |
+| `run.sh` | yes | Runs inside the runner for each leg. Gets `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `PGSSLMODE`, `PGCONNECT_TIMEOUT`, `LEG`, `CLIENT_TLS` (`0`/`1`) and `BACKEND_TLS` (empty for direct legs). Writes JUnit XML to `/results/junit/` |
+| `compose.yml` | yes | Adds the `runner` service (and, if the suite needs one, its own PostgreSQL setup) on top of `pgsql/docker/compose.yml`. Variables it can use: `UPSTREAM_DIR`, `SUITE_WORK`, `RUNNER_IMAGE`, `LEG_RESULTS_DIR`, `LEG_TARGET` |
+| `prepare.sh` | no | Runs once per job with the upstream checkout, the certificate folder and `SUITE_WORK`; makes the certificates (default: a new test CA) and any other files the suite needs |
+| `README.md` | yes | What the suite covers, how it is set up, how to update its pin |
+
+Rules: the upstream checkout is never edited, and no upstream test is removed or disabled. Settings go
+only into files or options the upstream tests themselves read.
+
+### pgJDBC
+
+`pgsql/suites/pgjdbc/` runs pgJDBC's own test suite (`./gradlew :postgresql:test`, about 9,000 tests,
+more with TLS) at `REL42.7.14`. See its [README](suites/pgjdbc/README.md).
+
 ## When a run fails
 
 | Message | Meaning |
@@ -219,6 +281,11 @@ docker run --rm --entrypoint proxysql pgsql-3p-proxysql:<commit> --version
 | `... use_native_backend_protocol is '...', expected 'true'` | The build does not use the native backend protocol by default (for example, a changed build flag) |
 | `... pg_stat_ssl.ssl is 't', expected 'f'` (or the reverse) | TLS on one side is not what the leg requires |
 | `private key in ...` / `secret value in ...` | The upload check found a key or a password in a leg's files; nothing was uploaded |
+| `Suite could not start: fetching ... failed` | The suite's upstream tests could not be downloaded at its tag |
+| `... is commit ..., expected ... (moved or rewritten tag?)` | The upstream tag now points to a different commit; the suite's pin must be checked and updated on purpose |
+| `Suite could not start: building the runner image failed 3 times` | The suite's test runner could not be built (often a dependency download); see `runner-build.log` in the artifact |
+| A leg `timed_out` | The suite's time limit was reached; `test-output.log` shows the last test that ran |
+| A leg `proxysql_crashed` | ProxySQL stopped or restarted during the tests; see `proxysql.log` and `containers.json` |
 
 ## Testing the scripts locally
 
@@ -236,6 +303,21 @@ bash pgsql/lib/tests/test-certs.sh          # needs openssl
 bash pgsql/lib/tests/test-guard.sh          # needs openssl
 bash pgsql/lib/tests/test-legs-summary.sh   # needs jq
 PROXYSQL_IMAGE=pgsql-3p-proxysql:<commit> bash pgsql/lib/tests/test-legs.sh   # docker, jq; about 5 minutes
+```
+
+```bash
+bash pgsql/lib/tests/test-fetch-suite.sh    # git only
+bash pgsql/lib/tests/test-junit-counts.sh   # python3, jq
+PROXYSQL_IMAGE=pgsql-3p-proxysql:<commit> bash pgsql/lib/tests/test-run-suite.sh   # docker; a few minutes
+```
+
+`test-run-suite.sh` runs a minimal suite and checks each outcome (`completed`, `timed_out`,
+`proxysql_crashed`, `no_results`), the test counts, `metadata.json` and the cleanup.
+
+To run a real suite on your machine, with any legs:
+
+```bash
+PROXYSQL_IMAGE=pgsql-3p-proxysql:<commit> bash pgsql/lib/run-suite.sh pgjdbc /tmp/pgjdbc-run direct-plain proxy-plain
 ```
 
 `test-legs.sh` brings up all six legs with a real ProxySQL image, checks each one, and also checks
@@ -274,7 +356,7 @@ Each stage is added on top of this one, and this file is extended with it:
 
 2. ~~The test environment: PostgreSQL 18.6 and ProxySQL started in Docker, with and without TLS.~~
    Done.
-3. The first test suite, pgJDBC, run directly against PostgreSQL and through ProxySQL.
+3. ~~The first test suite, pgJDBC, run directly against PostgreSQL and through ProxySQL.~~ Done.
 4. Per-suite reports: passed, failed, skipped and errored tests, and the list of tests that pass on
    PostgreSQL but fail through ProxySQL.
 5. Comparison with earlier runs (new failures, fixed tests, flaky tests).

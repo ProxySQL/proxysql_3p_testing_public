@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Usage: leg-up.sh LEG LEG_DIR      (env: CERT_DIR; PROXYSQL_IMAGE for proxy legs)
+# Usage: leg-up.sh LEG LEG_DIR      (env: CERT_DIR; PROXYSQL_IMAGE for proxy legs; optional SUITE_DIR,
+#                                   SUITE_ENV_FILE)
 # Starts one leg's environment (pgsql/docker/compose.yml), prepares PostgreSQL, configures ProxySQL with
 # its defaults plus the minimum the leg needs, and proves the connection and TLS state.
 # Writes LEG_DIR/artifacts/leg.json with status "ready" (exit 0) or "infra_failure" and a reason (exit 1).
 # Private files (never upload): LEG_DIR/compose.env, conn.env, pg-admin.env, secrets.
+# Suite mode (SUITE_DIR set): the suite's compose.yml is added on top of pgsql/docker/compose.yml (its own
+# PostgreSQL setup, its runner), its PROXYSQL_USERS and SUITE_DATABASE are used instead of the pgsql3p
+# user, and NETWORK_MODE=shared makes clients use the target's network (PGHOST=localhost).
+# SUITE_ENV_FILE: extra KEY=VALUE lines for the compose files (e.g. paths of the fetched upstream).
 set -Eeuo pipefail   # -E: the ERR trap also fires inside functions
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,31 +67,57 @@ on_exit() {
 }
 trap on_err ERR
 trap on_exit EXIT
+# stopped from outside (run-suite.sh's time limit): still record infra_failure on the way out
+trap 'ERR="stopped (time limit)"; exit 143' TERM
 
 STEP="check inputs"
 [[ -n ${CERT_DIR:-} && -f ${CERT_DIR}/server.pem ]] || fail "CERT_DIR must point to a certs.sh directory"
 CERT_DIR=$(cd "${CERT_DIR}" && pwd)
 [[ ${PROXY} -eq 0 || -n ${PROXYSQL_IMAGE:-} ]] || fail "PROXYSQL_IMAGE is required for proxysql legs"
 
+COMPOSE_FILES="${HERE}/../docker/compose.yml" PROXYSQL_USERS="" SUITE_DATABASE="" NETWORK_MODE=""
+if [[ -n ${SUITE_DIR:-} ]]; then
+    STEP="read suite settings"
+    SUITE_DIR=$(cd "${SUITE_DIR}" && pwd)
+    # shellcheck source=/dev/null
+    source "${SUITE_DIR}/suite.env"
+    [[ -n ${PROXYSQL_USERS} && -n ${SUITE_DATABASE} ]] || fail "${SUITE_DIR}/suite.env needs PROXYSQL_USERS and SUITE_DATABASE"
+    for pair in ${PROXYSQL_USERS}; do
+        [[ ${pair} =~ ^[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$ ]] || fail "PROXYSQL_USERS entry '${pair}' is not user:password"
+    done
+    [[ -f ${SUITE_DIR}/compose.yml ]] && COMPOSE_FILES+=":${SUITE_DIR}/compose.yml"
+    [[ -z ${SUITE_ENV_FILE:-} || -f ${SUITE_ENV_FILE} ]] || fail "SUITE_ENV_FILE ${SUITE_ENV_FILE} not found"
+fi
+CLIENT_SERVICE=client HOST=${TARGET}
+if [[ ${NETWORK_MODE} == shared ]]; then CLIENT_SERVICE=client-shared HOST=localhost; fi
+
 STEP="write leg settings"
 umask 077
 SUPER_PW=$(openssl rand -hex 12) APP_PW=$(openssl rand -hex 12)
+# the users ProxySQL gets, and the one clients and the proof connect as (the first)
+USERS=${PROXYSQL_USERS:-pgsql3p:${APP_PW}} DATABASE=${SUITE_DATABASE:-pgsql3p}
+FIRST=${USERS%% *} CONN_USER=${FIRST%%:*} CONN_PW=${FIRST#*:}
 cat > "${LEG_DIR}/compose.env" <<EOF
 COMPOSE_PROJECT_NAME=pgsql3p-${LEG}-$(openssl rand -hex 4)
-COMPOSE_FILE=${HERE}/../docker/compose.yml
+COMPOSE_FILE=${COMPOSE_FILES}
 COMPOSE_PROFILES=${PROFILES}
 POSTGRES_IMAGE=${POSTGRES_IMAGE}
 PROXYSQL_IMAGE=${PROXYSQL_IMAGE:-}
 CERT_DIR=${CERT_DIR}
 PG_SUPERUSER_PASSWORD=${SUPER_PW}
+LEG_TARGET=${TARGET}
+CLIENT_SERVICE=${CLIENT_SERVICE}
+SUITE_DIR=${SUITE_DIR:-}
 EOF
+[[ -z ${SUITE_ENV_FILE:-} ]] || cat "${SUITE_ENV_FILE}" >> "${LEG_DIR}/compose.env"
+# suite passwords in PROXYSQL_USERS are the upstream's public test credentials, not secrets
 printf '%s\n' "${SUPER_PW}" "${APP_PW}" > "${LEG_DIR}/secrets"
 cat > "${LEG_DIR}/conn.env" <<EOF
-PGHOST=${TARGET}
+PGHOST=${HOST}
 PGPORT=${PORT}
-PGDATABASE=pgsql3p
-PGUSER=pgsql3p
-PGPASSWORD=${APP_PW}
+PGDATABASE=${DATABASE}
+PGUSER=${CONN_USER}
+PGPASSWORD=${CONN_PW}
 PGSSLMODE=$([[ ${CLIENT_TLS} == 1 ]] && echo verify-full || echo disable)
 PGSSLROOTCERT=/tls/ca.pem
 PGCONNECT_TIMEOUT=10
@@ -110,11 +141,14 @@ STEP="start postgresql"
 
 STEP="prepare postgresql"
 # 'monitor'/'monitor' are ProxySQL's default monitor credentials, so ProxySQL's monitor settings stay default
-psql_pg -q <<EOF
+# (a suite's own PostgreSQL setup creates its users and databases itself)
+if [[ -z ${SUITE_DIR:-} ]]; then
+    psql_pg -q <<EOF
 CREATE ROLE pgsql3p LOGIN PASSWORD '${APP_PW}';
 CREATE DATABASE pgsql3p OWNER pgsql3p;
-CREATE ROLE monitor LOGIN PASSWORD 'monitor';
 EOF
+fi
+psql_pg -q -c "CREATE ROLE monitor LOGIN PASSWORD 'monitor'"
 SERVER_VERSION=$(psql_pg -tAc 'SHOW server_version')
 psql_pg -c 'SHOW ALL' > "${LEG_DIR}/artifacts/postgresql-settings.txt"
 
@@ -132,9 +166,13 @@ if [[ ${PROXY} -eq 1 ]]; then
     admin -c 'SELECT 1' >/dev/null 2>&1 || fail "proxysql admin port 6132 not reachable after 60s"
 
     STEP="configure proxysql"
+    USER_ROWS=""
+    for pair in ${USERS}; do
+        USER_ROWS+="INSERT INTO pgsql_users (username, password, fast_forward, default_hostgroup) VALUES ('${pair%%:*}', '${pair#*:}', 0, 0);"$'\n'
+    done
     OUT=$(admin 2>&1 <<EOF
 DELETE FROM pgsql_users;
-INSERT INTO pgsql_users (username, password, fast_forward, default_hostgroup) VALUES ('pgsql3p', '${APP_PW}', 0, 0);
+${USER_ROWS}
 DELETE FROM pgsql_servers;
 INSERT INTO pgsql_servers (hostgroup_id, hostname, port, use_ssl) VALUES (0, 'pg', 5432, ${BACKEND_TLS});
 UPDATE global_variables SET variable_value = '${SERVER_VERSION}' WHERE variable_name = 'pgsql-server_version';

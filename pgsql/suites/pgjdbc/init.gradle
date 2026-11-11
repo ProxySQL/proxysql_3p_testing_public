@@ -1,0 +1,63 @@
+// Applied by run.sh with --init-script. It changes how pgJDBC's tests are run, not what they test.
+import groovy.xml.XmlUtil
+
+// Gradle writes its JUnit files only when the test task ends, so a stopped run would leave none. This
+// listener also writes PARTIAL-<class>.xml as soon as each test class finishes; run.sh removes them
+// when Gradle's own TEST-<class>.xml files are there.
+class PartialJunit implements TestListener {
+    private final File dir
+    private final Map<String, List<Map>> cases = [:]
+    PartialJunit(File dir) { this.dir = dir }
+    void beforeSuite(TestDescriptor suite) {}
+    void beforeTest(TestDescriptor test) {}
+    synchronized void afterTest(TestDescriptor test, TestResult result) {
+        cases.computeIfAbsent(test.className ?: 'unknown') { [] } << [
+            name: test.displayName ?: test.name, result: result.resultType.name(),
+            time: (result.endTime - result.startTime) / 1000.0, message: result.exception?.toString() ?: '']
+    }
+    synchronized void afterSuite(TestDescriptor suite, TestResult result) {
+        // class level only (its parent is the test executor, which has no class name)
+        if (suite.className == null || suite.parent?.className != null || !cases.containsKey(suite.className)) {
+            return
+        }
+        List<Map> list = cases.remove(suite.className)
+        // control characters are not allowed in XML 1.0 (test names can contain them): written as \\uXXXX
+        def esc = { String s ->
+            XmlUtil.escapeXml((s ?: '').replaceAll('[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]') { String ch ->
+                String.format('\\\\u%04x', (int) ch.charAt(0))
+            })
+        }
+        def failed = list.count { it.result == 'FAILURE' }
+        def skipped = list.count { it.result == 'SKIPPED' }
+        def xml = new StringBuilder('<?xml version="1.0" encoding="UTF-8"?>\n')
+        xml << "<testsuite name=\"${esc(suite.className)}\" tests=\"${list.size()}\" failures=\"${failed}\" errors=\"0\" skipped=\"${skipped}\">\n"
+        list.each { c ->
+            xml << "  <testcase name=\"${esc(c.name)}\" classname=\"${esc(suite.className)}\" time=\"${c.time}\">"
+            if (c.result == 'FAILURE') { xml << "<failure message=\"${esc(c.message.take(1000))}\"/>" }
+            if (c.result == 'SKIPPED') { xml << '<skipped/>' }
+            xml << '</testcase>\n'
+        }
+        xml << '</testsuite>\n'
+        dir.mkdirs()
+        new File(dir, "PARTIAL-${suite.className}.xml").text = xml.toString()
+    }
+}
+
+allprojects {
+    tasks.withType(Test).configureEach {
+        // pgJDBC already sets a 5-minute timeout per test (junit.jupiter.execution.timeout.default).
+        // Enforced in a separate thread, a test blocked on a socket then fails as a timeout instead of
+        // hanging the whole suite.
+        systemProperty 'junit.jupiter.execution.timeout.thread.mode.default', 'SEPARATE_THREAD'
+        // results go straight to the leg's results folder
+        reports.junitXml.outputLocation.set(new File('/results/junit'))
+        reports.html.outputLocation.set(new File('/results/upstream-html'))
+        // A task timeout below the leg's limit (set by run.sh) ends the task in time, so run.sh can
+        // report the leg as timed out itself.
+        addTestListener(new PartialJunit(new File('/results/junit')))
+        def limit = System.getenv('PGSQL3P_TEST_TASK_TIMEOUT_SECONDS')
+        if (limit) {
+            timeout.set(java.time.Duration.ofSeconds(limit as long))
+        }
+    }
+}

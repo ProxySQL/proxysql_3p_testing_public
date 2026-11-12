@@ -51,7 +51,8 @@ Nothing in the pgJDBC checkout is edited or removed. All settings go into files 
   task ends. `init.gradle` therefore also writes `PARTIAL-<class>.xml` as each test class finishes, and
   ends the test task 5 minutes before the leg's limit (`run.sh` then reports the leg as `timed_out`).
   When Gradle's own files are written, `run.sh` removes the partial ones; if the run was stopped, the
-  partial files are the results.
+  partial files are the results. The partial files name each test exactly as Gradle's files do, so
+  results of a stopped leg can be compared test by test with a complete one.
 
 ## Differences to expect through ProxySQL
 

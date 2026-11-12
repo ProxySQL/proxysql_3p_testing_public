@@ -21,11 +21,12 @@ class PartialJunit implements TestListener {
             return
         }
         List<Map> list = cases.remove(suite.className)
-        // control characters are not allowed in XML 1.0 (test names can contain them): written as \\uXXXX
+        // names written as Gradle's own files write them, so a test has the same name in both: characters
+        // not allowed in XML 1.0 become '?', and tab, newline and carriage return are kept as character
+        // references (a raw one would be read back as a space)
         def esc = { String s ->
-            XmlUtil.escapeXml((s ?: '').replaceAll('[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]') { String ch ->
-                String.format('\\\\u%04x', (int) ch.charAt(0))
-            })
+            XmlUtil.escapeXml((s ?: '').replaceAll('[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]', '?'))
+                .replace('\t', '&#9;').replace('\n', '&#10;').replace('\r', '&#13;')
         }
         def failed = list.count { it.result == 'FAILURE' }
         def skipped = list.count { it.result == 'SKIPPED' }

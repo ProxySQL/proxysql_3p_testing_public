@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="a.B" tests="4" skipped="0" failures="0" errors="0">
+  <testcase name="ok()" classname="a.B" time="0.1"/>
+  <testcase name="tls()" classname="a.B" time="0.1"/>
+  <testcase name="tls()" classname="a.B" time="0.1"/>
+  <testcase name="tls()" classname="a.B" time="0.1"/>
+</testsuite>

@@ -1,0 +1,17 @@
+[[issue]]
+label = "environment"
+reason = "The runner runs as root"
+tests = ["a.B::broken()"]
+
+[[issue]]
+label = "proxy-architecture"
+reason = "TLS ends at ProxySQL"
+link = "https://example.invalid/tls"
+tests = ["a.B::tls()*"]
+message = "client certificate"
+
+[[issue]]
+label = "proxy-architecture"
+reason = "Users created by the test are unknown to ProxySQL"
+tests = ["a.B::run()*"]
+message = "Access denied"

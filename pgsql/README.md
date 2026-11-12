@@ -8,9 +8,10 @@ It is separate from the existing MySQL/legacy pipeline (`CI-3p.yml`, `3p-build.y
 which is not changed. The PostgreSQL suites that the legacy pipeline runs keep running until this
 pipeline has a replacement for each of them.
 
-**Status: stage 3.** The pipeline builds ProxySQL and runs the first test suite, pgJDBC, unmodified,
-directly against PostgreSQL and through ProxySQL, with and without TLS. Each leg's JUnit results and
-logs are kept. Comparing the results and reports come next (see [What comes next](#what-comes-next)).
+**Status: stage 4.** The pipeline builds ProxySQL and runs the first test suite, pgJDBC, unmodified,
+directly against PostgreSQL and through ProxySQL, with and without TLS. A report compares every test
+run through ProxySQL with the same test run directly, and lists the tests that pass directly but not
+through ProxySQL. Comparing with earlier runs comes next (see [What comes next](#what-comes-next)).
 
 ## What stage 1 adds
 
@@ -54,6 +55,16 @@ developer machine.
 | `pgsql/lib/junit-counts.py` | Adds up the tests, failures, errors and skips of a leg's JUnit files |
 | `pgsql/lib/tests/fixtures/` | A minimal suite and sample JUnit files used by the tests |
 
+## What stage 4 adds
+
+| File | Purpose |
+|---|---|
+| `pgsql/lib/report.py` | Reads every suite's results, compares each ProxySQL leg with its direct leg test by test, and writes the report (see [Reading the report](#reading-the-report)) |
+| `pgsql/suites/<suite>/known-issues.toml` | Known causes of failures, shown as labels in the report; the first one is pgJDBC's |
+| `.github/workflows/pgsql-3p.yml` | A new `report` job, after the suite jobs |
+| `pgsql/suites/pgjdbc/init.gradle` | The results written while a run goes now name each test exactly as Gradle's own files do, and include nested test classes, so a stopped leg can be compared with a complete one |
+| `pgsql/lib/tests/test-report.sh`, `pgsql/lib/tests/fixtures/report/` | Tests for `report.py`, with small sample results |
+
 ## How a run works
 
 ```
@@ -65,10 +76,13 @@ Run workflow (proxysql_ref = v3.0)
   │               check: version is 4.0.x and matches the commit
   │               upload: image file + build log
   │
-  └─ suite / <suite>   one job per suite, in parallel
-                       download and load the image; check: same image ID, version and commit
-                       get the suite's upstream tests at their pinned commit, build its test runner
-                       for each leg: start → prove → run the tests → save results and logs → stop
+  ├─ suite / <suite>   one job per suite, in parallel
+  │                    download and load the image; check: same image ID, version and commit
+  │                    get the suite's upstream tests at their pinned commit, build its test runner
+  │                    for each leg: start → prove → run the tests → save results and logs → stop
+  │
+  └─ report       after all suite jobs, even failed ones: compare each ProxySQL leg with its
+                  direct leg, test by test; run page summary and report artifact
 ```
 
 1. **resolve** looks up the newest commit of the branch you gave (default `v3.0`) in
@@ -89,6 +103,9 @@ Run workflow (proxysql_ref = v3.0)
    [How a leg works](#how-a-leg-works)). Its summary on the run page shows the image and, per leg, the
    outcome and the number of tests, failures, errors and skipped tests. The job turns red only when the
    suite or a leg could not be set up; failing tests are results, not job failures.
+4. **report** runs after all suite jobs, also when some of them failed or were stopped. It downloads
+   every suite's results, compares them (see [Reading the report](#reading-the-report)), writes the
+   report on the run page and uploads it as an artifact.
 
 ## How a leg works
 
@@ -102,8 +119,8 @@ ProxySQL.
 | `direct-tls` | PostgreSQL (`pg:5432`) | yes | - | yes |
 | `proxy-plain` | ProxySQL (`proxysql:6133`) | no | no | yes |
 | `proxy-tls` | ProxySQL (`proxysql:6133`) | yes | yes | yes |
-| `proxy-tls-front` | ProxySQL (`proxysql:6133`) | yes | no | not yet |
-| `proxy-tls-back` | ProxySQL (`proxysql:6133`) | no | yes | not yet |
+| `proxy-tls-front` | ProxySQL (`proxysql:6133`) | yes | no | with `tls=full` |
+| `proxy-tls-back` | ProxySQL (`proxysql:6133`) | no | yes | with `tls=full` |
 
 ```
 leg-up.sh   start PostgreSQL 18.6 (TLS always on) ─┐
@@ -198,13 +215,14 @@ Several runs can go at the same time, for example to test several ProxySQL commi
 
 Open a run from the **Actions** tab. The page shows each job with its steps and logs, the summary of
 each suite job (ProxySQL version and image ID, and one row per leg with its outcome and test counts),
-and an **Artifacts** section at the bottom with the files the run produced:
+the report of the `report` job (see [Reading the report](#reading-the-report)), and an **Artifacts** section at the bottom with the files the run produced:
 
 | Artifact | Contents | Kept for |
 |---|---|---|
 | `pgsql-3p-proxysql-image-<commit>` | `proxysql-image.tar.zst`, the ProxySQL runtime image | 3 days |
 | `pgsql-3p-build-log-<commit>-attempt<n>` | `build.log`, the full build output (one per attempt, so a re-run keeps the earlier log) | 7 days |
 | `pgsql-3p-<suite>-<commit7>-r<run>-a<attempt>` | One per suite: `metadata.json`, `runner-build.log`, and `legs/<leg>/` with the files below | `retention_days` (30) |
+| `pgsql-3p-report-<commit7>-r<run>-a<attempt>` | The report: `report.html` (open it in a browser; it needs no network), `report.md` (the same as the run page summary), `comparison.json` (every difference, test by test) and `<suite>/<leg>/results.json` (every test's outcome) | `retention_days` (30) |
 
 `metadata.json` records what was tested with what: the ProxySQL commit, version and image, the
 PostgreSQL image, the suite's upstream repository, tag and verified commit, the runner image, this
@@ -241,6 +259,69 @@ zstd -dc proxysql-image.tar.zst | docker load
 docker run --rm --entrypoint proxysql pgsql-3p-proxysql:<commit> --version
 ```
 
+## Reading the report
+
+The `report` job compares each ProxySQL leg with the direct leg that differs from it only by going
+through ProxySQL:
+
+| ProxySQL leg | Compared with |
+|---|---|
+| `proxy-plain`, `proxy-tls-back` | `direct-plain` |
+| `proxy-tls`, `proxy-tls-front` | `direct-tls` |
+
+A test is known by its class and name, for example
+`org.postgresql.test.jdbc2.BatchExecuteTest::testClearBatch()`. Some suites run the same test several
+times with different inputs under the same name; the second run gets `#2` added, the third `#3`, and so
+on. The order is the same in every leg, so each run is matched with the same run in the other leg.
+
+For each suite, the report shows:
+
+- **Which results it used**: the suite artifact's name. After a re-run of only the failed jobs, a suite
+  that did not run again keeps its results from the earlier attempt, and the report says so.
+- **One row per leg**: outcome, the leg it is compared with, the number of tests, passed, failed,
+  errored and skipped tests, the tests of the direct leg that did not run in this leg, the tests that
+  pass directly but not through ProxySQL, and how long the leg took.
+- **The tests that pass directly but not through ProxySQL**, per ProxySQL leg and grouped by test
+  class: how many failed, errored or did not run, and their labels. `report.html` lists each failing
+  test with its error message. In a leg that stopped early (time limit, ProxySQL crash), the tests it
+  never got to are given as one number ("Not reached before the time limit: N (of M not executed)")
+  and are not counted as tests that pass directly but not through ProxySQL: they never ran. These are
+  the classes the leg never started and the rest of the class it was running. A class that started
+  but failed as a whole is listed with its tests.
+- **The other differences**, counted: tests that fail both ways, pass only through ProxySQL, are
+  skipped in one leg only, or exist only in the ProxySQL leg (for example a whole test class that
+  could not start, which JUnit reports as one `initializationError`).
+- **Every failure of the direct legs**, with its label, or "unexplained" (`report.md` shows the first
+  100, `report.html` all of them).
+- **The known issues** and how many tests each one labels.
+
+**Labels.** A suite's `known-issues.toml` lists known causes. Each test it matches gets a label in the
+report:
+
+| Label | Meaning |
+|---|---|
+| `proxy-architecture` | Cannot work through any connection-pooling proxy (for example replication, or logging in as users a test creates) |
+| `unsupported-feature` | A PostgreSQL feature ProxySQL does not support |
+| `upstream-defect` | A problem of the test suite itself |
+| `config` | Caused by how the test environment is set up |
+| `environment` | Caused by the machine the tests run on (for example running as root) |
+
+Labels only explain. They never change a count, never move a test to another group, never change the
+report's colour, and never hide a test.
+
+**Red or green.** The `report` job is red when:
+
+- a suite uploaded no results, or could not start;
+- a leg could not be set up (`infra_failure`), produced no results (`no_results`), lost ProxySQL
+  (`proxysql_crashed`), or never recorded an outcome (`ready`: the job was stopped in the middle of
+  that leg);
+- a direct leg did not complete, so the ProxySQL legs compared with it cannot be compared ("not
+  comparable").
+
+Failing tests do not turn the report red: they are results. A leg that stopped early (`timed_out`,
+`proxysql_crashed`, `ready`) is compared with what it ran; one that could not be set up is "not run". Comparing with earlier runs (new failures, fixed tests,
+flaky tests) is the next stage; until then the report says "No comparison with earlier runs yet."
+
 ## Suites
 
 ### Adding a suite
@@ -255,9 +336,30 @@ A suite is a folder `pgsql/suites/<name>/`. Adding the folder is enough: the wor
 | `compose.yml` | yes | Adds the `runner` service (and, if the suite needs one, its own PostgreSQL setup) on top of `pgsql/docker/compose.yml`. Variables it can use: `UPSTREAM_DIR`, `SUITE_WORK`, `RUNNER_IMAGE`, `LEG_RESULTS_DIR`, `LEG_TARGET` |
 | `prepare.sh` | no | Runs once per job with the upstream checkout, the certificate folder and `SUITE_WORK`; makes the certificates (default: a new test CA) and any other files the suite needs |
 | `README.md` | yes | What the suite covers, how it is set up, how to update its pin |
+| `known-issues.toml` | no | Known causes of failures, shown as labels in the report (format below) |
 
 Rules: the upstream checkout is never edited, and no upstream test is removed or disabled. Settings go
 only into files or options the upstream tests themselves read.
+
+`known-issues.toml` holds one `[[issue]]` entry per known cause:
+
+```toml
+[[issue]]
+label = "proxy-architecture"          # one of the labels in "Reading the report"
+reason = "ProxySQL does not proxy replication connections"
+link = "https://..."                  # optional, for example an issue
+tests = ["org.postgresql.replication.*"]
+message = "requires SSL|rejects SSL"  # optional
+```
+
+- `tests` are patterns for the test name as the report shows it (`<class>::<name>`, with `#2`,
+  `#3`... for repeated names). `*` matches anything and `?` one character; `[` starts a set of
+  characters, so write `?` for a literal `[` or `]`.
+- `message`, if given, is a regular expression that must also be found in the test's error message.
+  It is for tests whose names do not tell them apart.
+- A test gets every label that matches it. A broken file (unknown label, missing reason, invalid
+  regular expression, a misspelt key, anything other than `[[issue]]` entries) makes the report fail
+  with the file name and the entry number.
 
 ### pgJDBC
 
@@ -286,6 +388,11 @@ more with TLS) at `REL42.7.14`. See its [README](suites/pgjdbc/README.md).
 | `Suite could not start: building the runner image failed 3 times` | The suite's test runner could not be built (often a dependency download); see `runner-build.log` in the artifact |
 | A leg `timed_out` | The suite's time limit was reached; `test-output.log` shows the last test that ran |
 | A leg `proxysql_crashed` | ProxySQL stopped or restarted during the tests; see `proxysql.log` and `containers.json` |
+| `<suite>: no results uploaded` (report) | The suite job uploaded nothing: it did not run (for example the build failed) or failed before the upload; see that job |
+| `<suite>: could not start: ...` (report) | The suite could not start (same reason as in its job) |
+| `<suite> <leg>: <outcome>` (report) | That leg could not be set up, produced no results, lost ProxySQL, or was stopped in the middle (`ready`); see the leg's `leg.json` and logs |
+| `<suite> <leg>: not comparable, baseline <leg> is ...` (report) | The direct leg it is compared with did not complete, so the tests of this leg cannot be compared |
+| `.../known-issues.toml: issue <n>: ...` (report) | That entry of the suite's `known-issues.toml` is invalid; nothing is reported until it is fixed |
 
 ## Testing the scripts locally
 
@@ -313,6 +420,18 @@ PROXYSQL_IMAGE=pgsql-3p-proxysql:<commit> bash pgsql/lib/tests/test-run-suite.sh
 
 `test-run-suite.sh` runs a minimal suite and checks each outcome (`completed`, `timed_out`,
 `proxysql_crashed`, `no_results`), the test counts, `metadata.json` and the cleanup.
+
+```bash
+bash pgsql/lib/tests/test-report.sh         # python3, jq
+```
+
+To make the report of a run on your machine, download its suite artifacts into one folder each,
+named after the artifact, and run `report.py` with the suites to report:
+
+```bash
+gh run download <run-id> -R ProxySQL/proxysql_3p_testing_public -n <artifact> -D downloads/<artifact>
+python3 -I pgsql/lib/report.py pgsql/suites downloads report pgjdbc   # writes report/report.html ...
+```
 
 To run a real suite on your machine, with any legs:
 
@@ -357,7 +476,7 @@ Each stage is added on top of this one, and this file is extended with it:
 2. ~~The test environment: PostgreSQL 18.6 and ProxySQL started in Docker, with and without TLS.~~
    Done.
 3. ~~The first test suite, pgJDBC, run directly against PostgreSQL and through ProxySQL.~~ Done.
-4. Per-suite reports: passed, failed, skipped and errored tests, and the list of tests that pass on
-   PostgreSQL but fail through ProxySQL.
+4. ~~Per-suite reports: passed, failed, skipped and errored tests, and the list of tests that pass on
+   PostgreSQL but fail through ProxySQL.~~ Done.
 5. Comparison with earlier runs (new failures, fixed tests, flaky tests).
 6. Complete documentation, followed by more test suites, one at a time.

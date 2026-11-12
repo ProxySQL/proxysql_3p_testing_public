@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="a.B" tests="10" skipped="1" failures="3" errors="0">
+  <testcase name="ok()" classname="a.B" time="0.1"/>
+  <testcase name="run()" classname="a.B" time="0.1"/>
+  <testcase name="run()" classname="a.B" time="0.1"/>
+  <testcase name="run()" classname="a.B" time="0.1"/>
+  <testcase name="broken()" classname="a.B" time="0.1"><failure message="root owns it&#10;second line" type="AssertionError">stack</failure></testcase>
+  <testcase name="skipme()" classname="a.B" time="0"><skipped/></testcase>
+  <testcase name="flaky()" classname="a.B" time="0.1"><failure message="boomxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" type="AssertionError">stack</failure></testcase>
+  <testcase name="gone()" classname="a.B" time="0.1"/>
+  <testcase name="err(&lt;T&gt;)" classname="a.B" time="0.1"/>
+  <testcase name="nomsg(a|b)" classname="a.B" time="0.1"><failure type="AssertionError">first text line&#10;more</failure></testcase>
+</testsuite>

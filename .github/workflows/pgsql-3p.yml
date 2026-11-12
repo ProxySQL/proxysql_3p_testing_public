@@ -6,6 +6,8 @@
 #   build    ProxySQL v4.0 at that commit, packaged once as a Docker image (pgsql-3p-build.yml)
 #   suite    one job per suite: loads exactly that image, then runs the suite's unmodified upstream
 #            tests in each leg (PostgreSQL directly and through ProxySQL, with and without TLS)
+#   report   compares each proxy leg with its direct leg, test by test, for every suite; writes the
+#            run page summary and the report artifact (red if a suite or leg could not run)
 # Independent of the MySQL pipeline (CI-3p.yml, 3p-build.yml, 3p-suite.yml).
 name: PostgreSQL 3rd-party tests
 run-name: "PostgreSQL 3rd-party tests ${{ inputs.proxysql_ref }}${{ inputs.suites && format(' [{0}]', inputs.suites) || '' }}"
@@ -199,3 +201,42 @@ jobs:
         fi
         # shellcheck disable=SC2086  # one argument per leg
         bash pgsql/lib/legs-summary.sh work/legs ${LEGS} >> "$GITHUB_STEP_SUMMARY"
+
+  # always(): a suite that failed or was cancelled is reported as such
+  report:
+    needs: [resolve, suite]
+    if: ${{ always() && needs.resolve.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        persist-credentials: false
+
+    # none uploaded (e.g. the build failed): the report says so for each suite
+    - name: Download the suite results
+      continue-on-error: true
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      with:
+        pattern: pgsql-3p-*-${{ needs.resolve.outputs.sha7 }}-r${{ github.run_id }}-a*
+        path: downloads
+
+    - name: Write the report
+      env:
+        SUITES: ${{ needs.resolve.outputs.suites }}
+      run: |
+        set -uo pipefail
+        mapfile -t LIST < <(jq -r '.[]' <<< "${SUITES}")
+        RC=0
+        python3 -I pgsql/lib/report.py pgsql/suites downloads report "${LIST[@]}" || RC=$?
+        if [[ -f report/report.md ]]; then cat report/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+        exit "${RC}"
+
+    - name: Upload the report
+      if: ${{ always() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: pgsql-3p-report-${{ needs.resolve.outputs.sha7 }}-r${{ github.run_id }}-a${{ github.run_attempt }}
+        path: report
+        retention-days: ${{ fromJson(needs.resolve.outputs.retention) }}

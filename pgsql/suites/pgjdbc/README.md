@@ -51,12 +51,14 @@ Nothing in the pgJDBC checkout is edited or removed. All settings go into files 
   task ends. `init.gradle` therefore also writes `PARTIAL-<class>.xml` as each test class finishes, and
   ends the test task 5 minutes before the leg's limit (`run.sh` then reports the leg as `timed_out`).
   When Gradle's own files are written, `run.sh` removes the partial ones; if the run was stopped, the
-  partial files are the results.
+  partial files are the results. The partial files name each test exactly as Gradle's files do and
+  include nested test classes, so results of a stopped leg can be compared test by test with a
+  complete one.
 
 ## Differences to expect through ProxySQL
 
 Some tests cannot pass through any connection-pooling proxy, whatever ProxySQL does. They are run and
-counted like every other test, never removed:
+counted like every other test, never removed, and `known-issues.toml` labels them in the report:
 
 - logical and physical replication (`LogicalReplicationTest`, `PhysicalReplicationTest`,
   `ReplicationSlotTest`): ProxySQL does not proxy replication connections;
@@ -65,6 +67,10 @@ counted like every other test, never removed:
   registered in it;
 - SSL tests that rely on per-database `hostssl`/`hostnossl` rules or client certificates: TLS ends at
   ProxySQL, so PostgreSQL does not see the client's TLS or certificate.
+
+Directly against PostgreSQL, one test fails:
+`PEMKeyManagerTest::testPermissionsGroupReadNonRootFails(Path)`. The test runner runs as root, and root
+can read any file, so the permission check it expects cannot fail. It is labelled `environment`.
 
 ## Updating the pin
 

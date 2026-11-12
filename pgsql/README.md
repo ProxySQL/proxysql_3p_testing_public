@@ -62,7 +62,7 @@ developer machine.
 | `pgsql/lib/report.py` | Reads every suite's results, compares each ProxySQL leg with its direct leg test by test, and writes the report (see [Reading the report](#reading-the-report)) |
 | `pgsql/suites/<suite>/known-issues.toml` | Known causes of failures, shown as labels in the report; the first one is pgJDBC's |
 | `.github/workflows/pgsql-3p.yml` | A new `report` job, after the suite jobs |
-| `pgsql/suites/pgjdbc/init.gradle` | The results written while a run goes now name each test exactly as Gradle's own files do, so a stopped leg can be compared with a complete one |
+| `pgsql/suites/pgjdbc/init.gradle` | The results written while a run goes now name each test exactly as Gradle's own files do, and include nested test classes, so a stopped leg can be compared with a complete one |
 | `pgsql/lib/tests/test-report.sh`, `pgsql/lib/tests/fixtures/report/` | Tests for `report.py`, with small sample results |
 
 ## How a run works
@@ -276,17 +276,23 @@ on. The order is the same in every leg, so each run is matched with the same run
 
 For each suite, the report shows:
 
+- **Which results it used**: the suite artifact's name. After a re-run of only the failed jobs, a suite
+  that did not run again keeps its results from the earlier attempt, and the report says so.
 - **One row per leg**: outcome, the leg it is compared with, the number of tests, passed, failed,
   errored and skipped tests, the tests of the direct leg that did not run in this leg, the tests that
   pass directly but not through ProxySQL, and how long the leg took.
 - **The tests that pass directly but not through ProxySQL**, per ProxySQL leg and grouped by test
   class: how many failed, errored or did not run, and their labels. `report.html` lists each failing
-  test with its error message. In a leg that reached its time limit, the tests it never got to are
-  given as one number ("Not reached before the time limit"), not as failures.
+  test with its error message. In a leg that stopped early (time limit, ProxySQL crash), the tests it
+  never got to are given as one number ("Not reached before the time limit: N (of M not executed)")
+  and are not counted as tests that pass directly but not through ProxySQL: they never ran. These are
+  the classes the leg never started and the rest of the class it was running. A class that started
+  but failed as a whole is listed with its tests.
 - **The other differences**, counted: tests that fail both ways, pass only through ProxySQL, are
   skipped in one leg only, or exist only in the ProxySQL leg (for example a whole test class that
   could not start, which JUnit reports as one `initializationError`).
-- **Every failure of the direct legs**, with its label, or "unexplained".
+- **Every failure of the direct legs**, with its label, or "unexplained" (`report.md` shows the first
+  100, `report.html` all of them).
 - **The known issues** and how many tests each one labels.
 
 **Labels.** A suite's `known-issues.toml` lists known causes. Each test it matches gets a label in the
@@ -312,8 +318,8 @@ report's colour, and never hide a test.
 - a direct leg did not complete, so the ProxySQL legs compared with it cannot be compared ("not
   comparable").
 
-Failing tests do not turn the report red: they are results. A leg that reached its time limit
-(`timed_out`) is compared with what it ran. Comparing with earlier runs (new failures, fixed tests,
+Failing tests do not turn the report red: they are results. A leg that stopped early (`timed_out`,
+`proxysql_crashed`, `ready`) is compared with what it ran; one that could not be set up is "not run". Comparing with earlier runs (new failures, fixed tests,
 flaky tests) is the next stage; until then the report says "No comparison with earlier runs yet."
 
 ## Suites
@@ -352,7 +358,8 @@ message = "requires SSL|rejects SSL"  # optional
 - `message`, if given, is a regular expression that must also be found in the test's error message.
   It is for tests whose names do not tell them apart.
 - A test gets every label that matches it. A broken file (unknown label, missing reason, invalid
-  regular expression) makes the report fail with the file name and the entry number.
+  regular expression, a misspelt key, anything other than `[[issue]]` entries) makes the report fail
+  with the file name and the entry number.
 
 ### pgJDBC
 

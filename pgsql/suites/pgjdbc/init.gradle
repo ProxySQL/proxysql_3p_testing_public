@@ -16,8 +16,9 @@ class PartialJunit implements TestListener {
             time: (result.endTime - result.startTime) / 1000.0, message: result.exception?.toString() ?: '']
     }
     synchronized void afterSuite(TestDescriptor suite, TestResult result) {
-        // class level only (its parent is the test executor, which has no class name)
-        if (suite.className == null || suite.parent?.className != null || !cases.containsKey(suite.className)) {
+        // class level only: a suite inside the same class (parameterized method or class invocation) is
+        // written with its class; a nested class (Outer$Inner, parent Outer) gets its own file
+        if (suite.className == null || suite.className == suite.parent?.className || !cases.containsKey(suite.className)) {
             return
         }
         List<Map> list = cases.remove(suite.className)

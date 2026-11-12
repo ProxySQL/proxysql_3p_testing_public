@@ -15,6 +15,7 @@ broken known-issues.toml.
 import fnmatch
 import html
 import json
+import os
 import re
 import sys
 import tomllib
@@ -31,6 +32,8 @@ BASELINE = {"proxy-plain": "direct-plain", "proxy-tls-back": "direct-plain",
 LEG_ORDER = ("direct-plain", "direct-tls", "proxy-plain", "proxy-tls", "proxy-tls-front", "proxy-tls-back")
 CLASSES = ("proxy_regression", "both_fail", "proxy_only_pass", "skip_mismatch", "not_executed", "leg_only")
 NOT_PASSED = ("failed", "errored")
+ISSUE_KEYS = {"label", "reason", "link", "tests", "message"}
+MD_LIST_MAX = 100  # lines per list in report.md: GitHub drops a run page summary over 1 MiB
 
 
 def find_artifact(download_dir, suite):
@@ -90,13 +93,20 @@ def load_issues(path):
         return []
     try:
         with open(path, "rb") as f:
-            issues = tomllib.load(f).get("issue", [])
+            data = tomllib.load(f)
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"{path}: {e}") from e
-    if not isinstance(issues, list):
-        raise ValueError(f"{path}: expected [[issue]] entries")
+    issues = data.get("issue", [])
+    # a misspelt key would otherwise be ignored silently: no labels, or a label without its condition
+    if set(data) - {"issue"} or not isinstance(issues, list):
+        raise ValueError(f"{path}: expected only [[issue]] entries, found {', '.join(sorted(data))}")
     for n, issue in enumerate(issues, 1):
         where = f"{path}: issue {n}"
+        if not isinstance(issue, dict):
+            raise ValueError(f"{where}: expected an [[issue]] table")
+        if set(issue) - ISSUE_KEYS:
+            raise ValueError(f"{where}: unknown keys {', '.join(sorted(set(issue) - ISSUE_KEYS))}"
+                             f" (allowed: {', '.join(sorted(ISSUE_KEYS))})")
         if issue.get("label") not in LABELS:
             raise ValueError(f"{where}: label must be one of {', '.join(LABELS)}")
         if not isinstance(issue.get("reason"), str) or not issue["reason"].strip():
@@ -168,6 +178,19 @@ def duration(info):
     return int((end - start).total_seconds())
 
 
+def not_reached_ids(base_tests, leg_tests):
+    """Baseline tests a leg that stopped early never got to: those of a class it never started, and
+    those after the last test it ran of a class (tests run in the same order in every leg). A class
+    that started but failed as a whole (initializationError) is not "not reached"."""
+    def class_of(test_id):
+        return test_id.split("::", 1)[0]
+
+    started = {class_of(i) for i in leg_tests}
+    last = {class_of(i): n for n, i in enumerate(base_tests) if i in leg_tests}
+    return {i for n, i in enumerate(base_tests) if i not in leg_tests
+            and (class_of(i) not in started or (class_of(i) in last and n > last[class_of(i)]))}
+
+
 def leg_key(name):
     return (LEG_ORDER.index(name), "") if name in LEG_ORDER else (len(LEG_ORDER), name)
 
@@ -176,6 +199,7 @@ def suite_report(suites_dir, download_dir, out_dir, suite):
     issues = load_issues(suites_dir / suite / "known-issues.toml")
     artifact = find_artifact(download_dir, suite)
     entry = {"artifact": artifact.name if artifact else None, "problem": None, "issues": issues,
+             "attempt": int(artifact.name.rsplit("-a", 1)[1]) if artifact else None,
              "metadata": read_json(artifact / "metadata.json") if artifact else None, "legs": {}}
     if artifact is None:
         entry["problem"] = "no results uploaded"
@@ -205,9 +229,15 @@ def suite_report(suites_dir, download_dir, out_dir, suite):
                  "labels": labels_for(i, t["message"], issues)}
                 for i, t in sorted(results[leg]["tests"].items()) if t["outcome"] in NOT_PASSED]
         base = data["baseline"]
-        if base and legs.get(base, {}).get("status") == "completed" and data["status"] in ("completed", "timed_out"):
+        # a leg that stopped early (timed out, crashed) is compared with what it ran; still red if it crashed
+        if base and legs.get(base, {}).get("status") == "completed" and data["status"] != "infra_failure":
             data["comparable"] = True
             data["classes"] = compare(results[base], results[leg], issues)
+            if data["status"] != "completed":
+                unreached = not_reached_ids(results[base]["tests"], results[leg]["tests"])
+                for e in data["classes"]["proxy_regression"] + data["classes"]["not_executed"]:
+                    if e["id"] in unreached:
+                        e["not_reached"] = True
             data["not_executed"] = sum(e["outcome"] == "not_executed" for c in ("proxy_regression", "not_executed")
                                        for e in data["classes"][c])
     return entry
@@ -242,11 +272,10 @@ def fmt_duration(seconds):
 
 def class_rows(d):
     """Regressions of a proxy leg per test class: (class, failed, errored, not executed, {label: n}, entries).
-    A timed-out leg's not-executed tests are left out (they are given as one "not reached" count)."""
-    timed_out = d["status"] == "timed_out"
+    Tests the leg did not reach are left out (they are given as one count)."""
     rows = {}
     for e in d["classes"]["proxy_regression"]:
-        if timed_out and e["outcome"] == "not_executed":
+        if e.get("not_reached"):
             continue
         row = rows.setdefault(e["id"].split("::", 1)[0], {"failed": 0, "errored": 0, "not_executed": 0,
                                                          "labels": Counter(), "entries": []})
@@ -257,10 +286,25 @@ def class_rows(d):
     return [(c, r["failed"], r["errored"], r["not_executed"], r["labels"], r["entries"]) for c, r in sorted(rows.items())]
 
 
-def not_reached(d):
-    if d["status"] != "timed_out":
-        return 0
-    return sum(e["outcome"] == "not_executed" for e in d["classes"]["proxy_regression"])
+def regressions(d):
+    """Tests that pass directly but failed, errored or were skipped over through ProxySQL; tests a
+    stopped leg did not reach are not counted: they were never run."""
+    return sum(not e.get("not_reached") for e in d["classes"]["proxy_regression"])
+
+
+def not_reached_text(d):
+    n = sum(bool(e.get("not_reached")) for c in ("proxy_regression", "not_executed") for e in d["classes"][c])
+    when = "the time limit" if d["status"] == "timed_out" else "the leg stopped"
+    return f"Not reached before {when}: {n} (of {d['not_executed']} not executed)" if n else ""
+
+
+def results_text(s, run_attempt):
+    if not s["artifact"]:
+        return ""
+    text = f"Results from {s['artifact']}."
+    if run_attempt and str(s["attempt"]) != str(run_attempt):
+        text += f" These results are from attempt {s['attempt']}; this is attempt {run_attempt}."
+    return text
 
 
 def other_counts(d):
@@ -273,13 +317,13 @@ def leg_cells(leg, d):
     counts = ["-"] * 5 if d["status"] == "infra_failure" else \
         [str(d["counts"][k]) for k in ("total", "passed", "failed", "errored", "skipped")]
     if d["baseline"] is None:
-        compared, not_executed, regressions = "-", "-", "-"
+        compared, not_executed, regressed = "-", "-", "-"
     elif d["comparable"]:
-        compared, not_executed = d["baseline"], str(d["not_executed"])
-        regressions = str(len(d["classes"]["proxy_regression"]))
+        compared, not_executed, regressed = d["baseline"], str(d["not_executed"]), str(regressions(d))
     else:
-        compared, not_executed, regressions = f"{d['baseline']} (not comparable)", "-", "-"
-    return [leg, d["status"], compared, *counts, not_executed, regressions, fmt_duration(d["duration_s"])]
+        why = "not run" if d["status"] == "infra_failure" else "not comparable"
+        compared, not_executed, regressed = f"{d['baseline']} ({why})", "-", "-"
+    return [leg, d["status"], compared, *counts, not_executed, regressed, fmt_duration(d["duration_s"])]
 
 
 def labels_text(labels):
@@ -321,6 +365,8 @@ def render_md(report):
         out += [f"## {md(suite)}", ""]
         if suite_meta(s):
             out += [md(suite_meta(s)), ""]
+        if results_text(s, report["run_attempt"]):
+            out += [md(results_text(s, report["run_attempt"])), ""]
         if s["problem"]:
             out += [md(f"{suite}: {s['problem']}"), ""]
         if not s["legs"]:
@@ -334,20 +380,21 @@ def render_md(report):
         for leg, d in s["legs"].items():
             if not d["comparable"]:
                 continue
-            n = len(d["classes"]["proxy_regression"])
-            out += ["", f"### {md(leg)}: {n} tests pass directly but not through ProxySQL", ""]
+            out += ["", f"### {md(leg)}: {regressions(d)} tests pass directly but not through ProxySQL", ""]
             rows = class_rows(d)
             if rows:
                 out += ["| Class | Failed | Errored | Not executed | Labels |", "|---|---:|---:|---:|---|"]
                 out += [f"| {md(c)} | {f} | {e} | {ne} | " + md(", ".join(f"{k} ({v})" for k, v in sorted(lbs.items()))) + " |"
                         for c, f, e, ne, lbs, _ in rows]
                 out.append("")
-            if not_reached(d):
-                out += [f"Not reached before the time limit: {not_reached(d)}", ""]
+            if not_reached_text(d):
+                out += [not_reached_text(d), ""]
             out.append(other_counts(d))
         out += ["", "### Direct baseline failures", ""]
         lines = [f"- {md(leg)}: {md(e['id'])} ({e['outcome']}): {md(labels_text(e['labels']))}"
                  for leg, d in s["legs"].items() for e in d["baseline_failures"]]
+        if len(lines) > MD_LIST_MAX:
+            lines = lines[:MD_LIST_MAX] + [f"And {len(lines) - MD_LIST_MAX} more in report.html."]
         out += (lines or ["None."]) + [""]
         if s["issues"]:
             hits = matched(s)
@@ -394,6 +441,8 @@ def render_html(report):
         out.append(f"<h2>{h(suite)}</h2>")
         if suite_meta(s):
             out.append(f"<p>{h(suite_meta(s))}</p>")
+        if results_text(s, report["run_attempt"]):
+            out.append(f"<p>{h(results_text(s, report['run_attempt']))}</p>")
         if s["problem"]:
             out.append(f"<p>{h(suite)}: {h(s['problem'])}</p>")
         if not s["legs"]:
@@ -408,7 +457,7 @@ def render_html(report):
             if not d["comparable"]:
                 continue
             c = d["classes"]
-            out.append(f"<h3>{h(leg)}: {len(c['proxy_regression'])} tests pass directly but not through ProxySQL</h3>")
+            out.append(f"<h3>{h(leg)}: {regressions(d)} tests pass directly but not through ProxySQL</h3>")
             rows = class_rows(d)
             if rows:
                 out.append("<table><tr><th>Class</th><th>Failed</th><th>Errored</th><th>Not executed</th><th>Labels</th></tr>")
@@ -416,8 +465,8 @@ def render_html(report):
                         f"<td class=n>{ne}</td><td>{h(', '.join(f'{k} ({v})' for k, v in sorted(lbs.items())))}</td></tr>"
                         for cls, f, e, ne, lbs, entries in rows]
                 out.append("</table>")
-            if not_reached(d):
-                out.append(f"<p>Not reached before the time limit: {not_reached(d)}</p>")
+            if not_reached_text(d):
+                out.append(f"<p>{h(not_reached_text(d))}</p>")
             out.append(f"<p>{h(other_counts(d))}</p>")
             out.append(details("Fails both ways", c["both_fail"]) + details("Passes only through ProxySQL", c["proxy_only_pass"])
                        + details("Skipped in one leg only", c["skip_mismatch"])
@@ -450,7 +499,8 @@ def main(argv):
         print("usage: report.py SUITES_DIR DOWNLOAD_DIR OUT_DIR SUITE...", file=sys.stderr)
         return 2
     suites_dir, download_dir, out_dir = (Path(a) for a in argv[:3])
-    report = {"red": False, "problems": [], "history": None, "suites": {}}
+    report = {"red": False, "problems": [], "history": None, "suites": {},
+              "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT")}
     try:
         for suite in argv[3:]:
             report["suites"][suite] = suite_report(suites_dir, download_dir, out_dir, suite)

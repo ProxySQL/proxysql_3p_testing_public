@@ -20,6 +20,7 @@ report() {
     RC=$?
 }
 A=downloads/pgsql-3p-demo-abcdef1-r1-a1
+unset GITHUB_RUN_ATTEMPT
 
 BASE=$(scenario base)
 report "${BASE}" demo
@@ -95,15 +96,20 @@ report "${NOL}" demo
     && $(jq '[.. | .labels? // empty | length] | add' "${NOL}/out/comparison.json") == 0 ]] \
     && pass "labels never change counts or classes; no known-issues.toml means no labels" || fail "labels change results (rc=${RC})"
 
-for bad in 'label = "nope"' 'message = "("' 'reason = ""'; do
+GOOD=$'label = "config"\nreason = "r"\ntests = ["a.B::x()"]'
+for bad in $'[[issue]]\nlabel = "nope"\nreason = "r"\ntests = ["a.B::x()"]' \
+           $'[[issue]]\nlabel = "config"\nreason = ""\ntests = ["a.B::x()"]' \
+           $'[[issue]]\n'"${GOOD}"$'\nmessage = "("' \
+           $'[[issue]]\n'"${GOOD}"$'\nmesage = "client certificate"' \
+           'issue = ["x"]' \
+           $'[[issues]]\n'"${GOOD}"; do
     BAD=$(scenario bad)
-    { echo '[[issue]]'; echo 'tests = ["a.B::x()"]'
-      [[ ${bad} == label* ]] || echo 'label = "config"'
-      [[ ${bad} == reason* ]] || echo 'reason = "r"'
-      echo "${bad}"; } > "${BAD}/suites/demo/known-issues.toml"
+    echo "${bad}" > "${BAD}/suites/demo/known-issues.toml"
     report "${BAD}" demo
-    [[ ${RC} -eq 2 && $(< "${BAD}/stderr") == *known-issues.toml*"issue 1"* ]] \
-        && pass "known-issues.toml with ${bad} exits 2 naming the entry" || fail "bad issue ${bad} (rc=${RC}: $(< "${BAD}/stderr"))"
+    WHAT=$(head -c 40 <<< "${bad//$'\n'/ }")
+    [[ ${RC} -eq 2 && $(< "${BAD}/stderr") == *known-issues.toml* && $(< "${BAD}/stderr") != *Traceback* ]] \
+        && pass "a broken known-issues.toml exits 2 naming the file: ${WHAT}" || fail "bad issue ${WHAT} (rc=${RC}: $(< "${BAD}/stderr"))"
+    [[ ${bad} != '[[issue]]'* || $(< "${BAD}/stderr") == *"issue 1"* ]] || fail "bad issue ${WHAT}: entry not named"
     rm -rf "${BAD}"
 done
 
@@ -117,7 +123,10 @@ has() { local f=$1; shift; for t in "$@"; do grep -qF -- "${t}" "${f}" 2>/dev/nu
     '| direct-tls | completed | - | 4 | 4 | 0 | 0 | 0 | - | - | 1h 02m |' \
     '### proxy-plain: 3 tests pass directly but not through ProxySQL' \
     '| Class | Failed | Errored | Not executed | Labels |' \
-    'Not reached before the time limit: 1' \
+    'Not reached before the time limit: 1 (of 1 not executed)' \
+    '| proxy-tls | timed_out | direct-tls | 3 | 1 | 2 | 0 | 0 | 1 | 2 | 1h 00m |' \
+    '### proxy-tls: 2 tests pass directly but not through ProxySQL' \
+    'Results from pgsql-3p-demo-abcdef1-r1-a1.' \
     'Fails both ways: 2 · passes only through ProxySQL: 1 · skipped in one leg only: 1 · only in this leg: 1' \
     'direct-plain: a.B::flaky() (failed): unexplained' \
     'direct-plain: a.B::broken() (failed): environment: The runner runs as root' \
@@ -132,7 +141,7 @@ has "${MD}" 'direct-plain: a.B::nomsg(a\|b) (failed): unexplained' && ! grep -qF
     && pass "test names are escaped in report.md and report.html" || fail "escaping"
 
 [[ $(head -c 15 "${HTML}") == '<!doctype html>' ]] && ! grep -qiE '<script|<link|src=' "${HTML}" \
-    && has "${HTML}" 'Not reached before the time limit: 1' 'class setup failed' \
+    && has "${HTML}" 'Not reached before the time limit: 1 (of 1 not executed)' 'class setup failed' \
     && pass "report.html is self-contained and lists the details" || fail "html"
 
 # setleg DIR LEG STATUS [REASON]
@@ -152,6 +161,9 @@ setleg "$(scenario crashed)" proxy-plain proxysql_crashed;          red crashed 
 setleg "$(scenario infra)" proxy-tls infra_failure 'start proxysql: x'; red infra 'demo proxy-tls: infra_failure: start proxysql: x'
 setleg "$(scenario noresults)" proxy-plain no_results;              red noresults 'demo proxy-plain: no_results'
 setleg "$(scenario ready)" proxy-tls ready;                         red ready 'demo proxy-tls: ready'
+has "${TMP}/crashed/out/report.md" '| proxy-plain | proxysql_crashed | direct-plain |' '### proxy-plain: 3 tests pass directly but not through ProxySQL' \
+    && has "${TMP}/infra/out/report.md" '| proxy-tls | infra_failure | direct-tls (not run) |' \
+    && pass "a leg that crashed is still compared; a leg that could not be set up is not run" || fail "crashed/infra comparison"
 setleg "$(scenario baseline)" direct-tls timed_out;                 red baseline 'demo proxy-tls: not comparable, baseline direct-tls is timed_out'
 has "${TMP}/baseline/out/report.md" '| proxy-tls | timed_out | direct-tls (not comparable) |' \
     && pass "a proxy leg without a completed baseline is shown as not comparable" || fail "not comparable row"
@@ -159,6 +171,33 @@ scenario missing > /dev/null;                                       red missing 
 has "${TMP}/missing/out/report.md" '## demo' '## other' && pass "the other suites are still reported" || fail "missing: demo not reported"
 NS=$(scenario nostart); echo '{"reason": "fetching x failed"}' > "${NS}/${A}/suite-status.json"
 red nostart 'demo: could not start: fetching x failed'
+
+# I1: in a leg that stopped early, only tests of classes it never started, or after the last test it
+# ran of a class, count as not reached; a class that failed as a whole shows in the table
+CF=$(scenario classfail)
+printf '<testsuite name="c.D"><testcase name="x()" classname="c.D"/><testcase name="y()" classname="c.D"/></testsuite>\n' \
+    > "${CF}/${A}/legs/direct-tls/junit/TEST-c.D.xml"
+printf '<testsuite name="e.F"><testcase name="z()" classname="e.F"/></testsuite>\n' > "${CF}/${A}/legs/direct-tls/junit/TEST-e.F.xml"
+printf '<testsuite name="c.D"><testcase name="initializationError" classname="c.D"><failure message="no"/></testcase></testsuite>\n' \
+    > "${CF}/${A}/legs/proxy-tls/junit/PARTIAL-c.D.xml"
+report "${CF}" demo
+has "${CF}/out/report.md" '| c.D | 0 | 0 | 2 |  |' 'Not reached before the time limit: 2 (of 4 not executed)' \
+    && pass "a class that failed as a whole in a stopped leg is listed, not counted as not reached" || fail "class failure in a stopped leg"
+
+# I4: the report says which artifact it used, and when it is from an earlier attempt
+ATT2=$(scenario attempt2)
+GITHUB_RUN_ATTEMPT=2 report "${ATT2}" demo
+has "${ATT2}/out/report.md" 'Results from pgsql-3p-demo-abcdef1-r1-a1. These results are from attempt 1; this is attempt 2.' \
+    && pass "results of an earlier attempt are named as such" || fail "earlier attempt"
+
+# I5: long lists in report.md stop after 100 lines (the run page summary must stay under 1 MB)
+LONGL=$(scenario long)
+{ echo '<testsuite name="g.H">'
+  for i in $(seq 150); do echo "<testcase name=\"t${i}()\" classname=\"g.H\"><failure message=\"m\"/></testcase>"; done
+  echo '</testsuite>'; } > "${LONGL}/${A}/legs/direct-plain/junit/TEST-g.H.xml"
+report "${LONGL}" demo
+[[ $(grep -c '^- direct-plain: ' "${LONGL}/out/report.md") -eq 100 ]] && has "${LONGL}/out/report.md" 'And 53 more in report.html.' \
+    && pass "report.md lists at most 100 baseline failures" || fail "long list ($(grep -c '^- direct-plain:' "${LONGL}/out/report.md"))"
 
 ERR=$(python3 -I "${LIB}/report.py" only-two-args x 2>&1 > /dev/null); RC=$?
 [[ ${RC} -eq 2 && ${ERR} == *"usage: report.py SUITES_DIR DOWNLOAD_DIR OUT_DIR SUITE..."* ]] \

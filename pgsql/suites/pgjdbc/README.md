@@ -13,7 +13,7 @@ Nothing in the pgJDBC checkout is edited or removed. All settings go into files 
 
 | File | Purpose |
 |---|---|
-| `suite.env` | The pinned upstream, ProxySQL users (`test`/`test`, `postgres`/`postgres`, pgJDBC's own test credentials), database `test`, shared network, 60-minute limit per leg |
+| `suite.env` | The pinned upstream, ProxySQL users (`test`/`test`, `postgres`/`postgres`, pgJDBC's own test credentials, and the two roles `SslTest` creates with fixed passwords), database `test`, shared network, 60-minute limit per leg |
 | `prepare.sh` | Uses pgJDBC's test server certificate (`certdir/server`) for PostgreSQL and ProxySQL, and makes a copy of its `pg_hba.conf` with one added line for ProxySQL's health checks |
 | `compose.yml` | PostgreSQL set up by pgJDBC's own `docker/postgres-server` scripts; the `runner` service |
 | `Dockerfile` | The runner: pgJDBC's checkout on the pinned Temurin 21 JDK image, test classes compiled when the image is built |

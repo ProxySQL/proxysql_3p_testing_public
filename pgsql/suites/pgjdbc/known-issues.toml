@@ -1,0 +1,38 @@
+# Known causes of pgJDBC results that fail directly, or differ through ProxySQL. Read by
+# pgsql/lib/report.py; the format is described in pgsql/README.md ("Adding a suite").
+#
+# Labels explain results: they never change a count, a comparison class or the report's colour, and
+# they never hide a test. A labelled test that fails through ProxySQL is still listed as failing.
+# ProxySQL bugs are not labelled here: they show as plain ProxySQL failures.
+
+[[issue]]
+label = "environment"
+reason = "The test runner runs as root, and root can read any file, so a file with group read permission is not rejected"
+tests = ["org.postgresql.test.ssl.PEMKeyManagerTest::testPermissionsGroupReadNonRootFails(Path)"]
+
+[[issue]]
+label = "proxy-architecture"
+reason = "ProxySQL does not proxy replication connections"
+tests = ["org.postgresql.replication.*"]
+
+[[issue]]
+label = "proxy-architecture"
+reason = "There is one ProxySQL endpoint, not several servers with different roles"
+tests = ["org.postgresql.test.hostchooser.MultiHostsConnectionTest::*"]
+
+[[issue]]
+label = "proxy-architecture"
+reason = "ProxySQL authenticates clients itself: it only knows the users registered in it, not the ones a test creates, and uses its own authentication method"
+tests = [
+    "org.postgresql.jdbc.ScramTest::*",
+    "org.postgresql.test.util.PasswordUtilTest::*",
+    "org.postgresql.test.core.RequireAuthTest::*",
+    "org.postgresql.test.plugin.AuthenticationPluginTest::*",
+]
+
+# SslTest's cases are all named run(); only the failure message tells which rule a case checks
+[[issue]]
+label = "proxy-architecture"
+reason = "TLS ends at ProxySQL, so PostgreSQL's per-database TLS and client certificate rules apply to ProxySQL's connection, not to the client's"
+tests = ["org.postgresql.test.ssl.SslTest::*"]
+message = "requires client certificate|BAD client certificate|requires SSL|rejects SSL"

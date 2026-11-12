@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="a.B" tests="3" failures="2" errors="0" skipped="0">
+  <testcase name="ok()" classname="a.B" time="0.1"></testcase>
+  <testcase name="tls()" classname="a.B" time="0.1"><failure message="client certificate was not sent"/></testcase>
+  <testcase name="tls()" classname="a.B" time="0.1"><failure message="SQLException present"/></testcase>
+</testsuite>

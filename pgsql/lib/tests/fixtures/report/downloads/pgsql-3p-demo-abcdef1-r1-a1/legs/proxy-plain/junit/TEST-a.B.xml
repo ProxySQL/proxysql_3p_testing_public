@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="a.B" tests="10" skipped="0" failures="4" errors="1">
+  <testcase name="ok()" classname="a.B" time="0.1"/>
+  <testcase name="run()" classname="a.B" time="0.1"/>
+  <testcase name="run()" classname="a.B" time="0.1"><failure message="Access denied for user" type="PSQLException">stack</failure></testcase>
+  <testcase name="run()" classname="a.B" time="0.1"/>
+  <testcase name="broken()" classname="a.B" time="0.1"><failure message="root owns it" type="AssertionError">stack</failure></testcase>
+  <testcase name="skipme()" classname="a.B" time="0.1"/>
+  <testcase name="flaky()" classname="a.B" time="0.1"/>
+  <testcase name="err(&lt;T&gt;)" classname="a.B" time="0.1"><error message="io error" type="IOException">stack</error></testcase>
+  <testcase name="nomsg(a|b)" classname="a.B" time="0.1"><failure type="AssertionError">first text line</failure></testcase>
+  <testcase name="initializationError" classname="a.B" time="0"><failure message="class setup failed" type="Exception">stack</failure></testcase>
+</testsuite>

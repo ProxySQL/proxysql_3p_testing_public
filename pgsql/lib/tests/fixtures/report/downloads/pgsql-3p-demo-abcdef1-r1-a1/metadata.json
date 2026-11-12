@@ -1,0 +1,1 @@
+{"suite": "demo", "proxysql": {"version": "4.0.13-test"}, "upstream": {"ref": "v1", "sha": "1111111111111111111111111111111111111111"}}

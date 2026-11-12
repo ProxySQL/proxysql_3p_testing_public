@@ -23,6 +23,7 @@ A=downloads/pgsql-3p-demo-abcdef1-r1-a1
 
 BASE=$(scenario base)
 report "${BASE}" demo
+BASE_RC=${RC}
 R=${BASE}/out/demo
 # ids DIR LEG: the leg's test ids, one per line
 ids() { jq -r '.tests | keys[]' "$1/$2/results.json" 2>/dev/null; }
@@ -105,6 +106,59 @@ for bad in 'label = "nope"' 'message = "("' 'reason = ""'; do
         && pass "known-issues.toml with ${bad} exits 2 naming the entry" || fail "bad issue ${bad} (rc=${RC}: $(< "${BAD}/stderr"))"
     rm -rf "${BAD}"
 done
+
+# --- report.md, report.html, red / green
+MD=${BASE}/out/report.md HTML=${BASE}/out/report.html
+# has FILE TEXT...: FILE contains every TEXT as a fixed string
+has() { local f=$1; shift; for t in "$@"; do grep -qF -- "${t}" "${f}" 2>/dev/null || { echo "  missing in ${f##*/}: ${t}"; return 1; }; done; }
+[[ ${BASE_RC} -eq 0 ]] && has "${MD}" '# PostgreSQL 3rd-party tests: report' '**Result: green**' \
+    '| Leg | Status | Compared with | Total | Passed | Failed | Errored | Skipped | Not executed | Regressions | Duration |' \
+    '| proxy-plain | completed | direct-plain | 10 | 5 | 4 | 1 | 0 | 1 | 3 | 3m 52s |' \
+    '| direct-tls | completed | - | 4 | 4 | 0 | 0 | 0 | - | - | 1h 02m |' \
+    '### proxy-plain: 3 tests pass directly but not through ProxySQL' \
+    '| Class | Failed | Errored | Not executed | Labels |' \
+    'Not reached before the time limit: 1' \
+    'Fails both ways: 2 · passes only through ProxySQL: 1 · skipped in one leg only: 1 · only in this leg: 1' \
+    'direct-plain: a.B::flaky() (failed): unexplained' \
+    'direct-plain: a.B::broken() (failed): environment: The runner runs as root' \
+    'No comparison with earlier runs yet.' 'proxy-plain: 1 JUnit files could not be read.' \
+    && pass "green report: leg table, regressions by class, not reached, baseline failures, history hook" || fail "green report (rc=${BASE_RC})"
+
+[[ $(jq .red "${C}") == false ]] && has "${MD}" '| a.B | 1 | 1 | 1 | proxy-architecture (1) |' \
+    && pass "a regression class row counts failed, errored and not executed, and its labels" || fail "class row"
+
+has "${MD}" 'direct-plain: a.B::nomsg(a\|b) (failed): unexplained' && ! grep -qF 'err(<T>)' "${MD}" \
+    && has "${HTML}" 'a.B::err(&lt;T&gt;)' && ! grep -qF 'err(<T>)' "${HTML}" \
+    && pass "test names are escaped in report.md and report.html" || fail "escaping"
+
+[[ $(head -c 15 "${HTML}") == '<!doctype html>' ]] && ! grep -qiE '<script|<link|src=' "${HTML}" \
+    && has "${HTML}" 'Not reached before the time limit: 1' 'class setup failed' \
+    && pass "report.html is self-contained and lists the details" || fail "html"
+
+# setleg DIR LEG STATUS [REASON]
+setleg() {
+    local f=$1/${A}/legs/$2/leg.json
+    jq --arg s "$3" --arg r "${4:-}" '.status = $s | .reason = $r' "${f}" > "${f}.new" && mv "${f}.new" "${f}"
+}
+# red NAME PROBLEM [SUITE...]: the scenario NAME (already changed) is red with PROBLEM
+red() {
+    local name=$1 problem=$2; shift 2
+    report "${TMP}/${name}" "${@:-demo}"
+    [[ ${RC} -eq 1 && $(jq .red "${TMP}/${name}/out/comparison.json") == true ]] \
+        && has "${TMP}/${name}/out/report.md" '**Result: red**' "${problem}" && grep -qF "::error::${problem}" "${TMP}/${name}/stderr" \
+        && pass "red: ${problem}" || fail "red ${name} (rc=${RC}: $(< "${TMP}/${name}/stderr"))"
+}
+setleg "$(scenario crashed)" proxy-plain proxysql_crashed;          red crashed 'demo proxy-plain: proxysql_crashed'
+setleg "$(scenario infra)" proxy-tls infra_failure 'start proxysql: x'; red infra 'demo proxy-tls: infra_failure: start proxysql: x'
+setleg "$(scenario noresults)" proxy-plain no_results;              red noresults 'demo proxy-plain: no_results'
+setleg "$(scenario ready)" proxy-tls ready;                         red ready 'demo proxy-tls: ready'
+setleg "$(scenario baseline)" direct-tls timed_out;                 red baseline 'demo proxy-tls: not comparable, baseline direct-tls is timed_out'
+has "${TMP}/baseline/out/report.md" '| proxy-tls | timed_out | direct-tls (not comparable) |' \
+    && pass "a proxy leg without a completed baseline is shown as not comparable" || fail "not comparable row"
+scenario missing > /dev/null;                                       red missing 'other: no results uploaded' demo other
+has "${TMP}/missing/out/report.md" '## demo' '## other' && pass "the other suites are still reported" || fail "missing: demo not reported"
+NS=$(scenario nostart); echo '{"reason": "fetching x failed"}' > "${NS}/${A}/suite-status.json"
+red nostart 'demo: could not start: fetching x failed'
 
 ERR=$(python3 -I "${LIB}/report.py" only-two-args x 2>&1 > /dev/null); RC=$?
 [[ ${RC} -eq 2 && ${ERR} == *"usage: report.py SUITES_DIR DOWNLOAD_DIR OUT_DIR SUITE..."* ]] \

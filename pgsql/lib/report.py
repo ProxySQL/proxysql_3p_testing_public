@@ -5,11 +5,15 @@ the workflow uploads it) and writes:
 - OUT_DIR/<suite>/<leg>/results.json: one outcome per test (passed, failed, errored, skipped), from
   the leg's JUnit files;
 - OUT_DIR/comparison.json: per leg its counts and, for each proxy leg, how every test differs from
-  the same test in its direct baseline leg; labels from SUITES_DIR/<suite>/known-issues.toml.
+  the same test in its direct baseline leg; labels from SUITES_DIR/<suite>/known-issues.toml;
+- OUT_DIR/report.md (also the run page summary) and OUT/report.html (static, no external files).
 
-Exit status: 0, or 2 for wrong arguments or a broken known-issues.toml.
+Exit status: 0 green; 1 red (a suite or a leg could not run, or a baseline leg did not complete, so
+its proxy legs cannot be compared), each reason printed as ::error::; 2 for wrong arguments or a
+broken known-issues.toml.
 """
 import fnmatch
+import html
 import json
 import re
 import sys
@@ -174,7 +178,11 @@ def suite_report(suites_dir, download_dir, out_dir, suite):
     entry = {"artifact": artifact.name if artifact else None, "problem": None, "issues": issues,
              "metadata": read_json(artifact / "metadata.json") if artifact else None, "legs": {}}
     if artifact is None:
+        entry["problem"] = "no results uploaded"
         return entry
+    status = read_json(artifact / "suite-status.json")
+    if status is not None:
+        entry["problem"] = f"could not start: {status.get('reason', '')}"
     results = {}
     for leg_dir in sorted((artifact / "legs").glob("*"), key=lambda d: leg_key(d.name)):
         leg = leg_dir.name
@@ -205,6 +213,231 @@ def suite_report(suites_dir, download_dir, out_dir, suite):
     return entry
 
 
+def problems(report):
+    """Why the report is red: suites or legs that could not run, proxy legs that cannot be compared."""
+    out = []
+    # stage 5 adds: a proxy_regression that was not there in the newest comparable earlier run
+    for suite, s in report["suites"].items():
+        if s["problem"]:
+            out.append(f"{suite}: {s['problem']}")
+        elif not s["legs"]:
+            out.append(f"{suite}: no leg results")
+        for leg, d in s["legs"].items():
+            if d["status"] not in ("completed", "timed_out"):
+                out.append(f"{suite} {leg}: {d['status']}" + (f": {d['reason']}" if d["reason"] else ""))
+            base = d["baseline"]
+            base_status = s["legs"].get(base, {}).get("status") if base else None
+            if base and base_status != "completed":
+                out.append(f"{suite} {leg}: not comparable, baseline {base} is {base_status or 'missing'}")
+    return out
+
+
+def fmt_duration(seconds):
+    if seconds is None:
+        return "-"
+    if seconds >= 3600:
+        return f"{seconds // 3600}h {seconds % 3600 // 60:02d}m"
+    return f"{seconds // 60}m {seconds % 60:02d}s"
+
+
+def class_rows(d):
+    """Regressions of a proxy leg per test class: (class, failed, errored, not executed, {label: n}, entries).
+    A timed-out leg's not-executed tests are left out (they are given as one "not reached" count)."""
+    timed_out = d["status"] == "timed_out"
+    rows = {}
+    for e in d["classes"]["proxy_regression"]:
+        if timed_out and e["outcome"] == "not_executed":
+            continue
+        row = rows.setdefault(e["id"].split("::", 1)[0], {"failed": 0, "errored": 0, "not_executed": 0,
+                                                         "labels": Counter(), "entries": []})
+        row[e["outcome"]] += 1
+        row["labels"].update({lb["label"] for lb in e["labels"]})
+        if e["outcome"] in NOT_PASSED:
+            row["entries"].append(e)
+    return [(c, r["failed"], r["errored"], r["not_executed"], r["labels"], r["entries"]) for c, r in sorted(rows.items())]
+
+
+def not_reached(d):
+    if d["status"] != "timed_out":
+        return 0
+    return sum(e["outcome"] == "not_executed" for e in d["classes"]["proxy_regression"])
+
+
+def other_counts(d):
+    c = d["classes"]
+    return (f"Fails both ways: {len(c['both_fail'])} · passes only through ProxySQL: {len(c['proxy_only_pass'])}"
+            f" · skipped in one leg only: {len(c['skip_mismatch'])} · only in this leg: {len(c['leg_only'])}")
+
+
+def leg_cells(leg, d):
+    counts = ["-"] * 5 if d["status"] == "infra_failure" else \
+        [str(d["counts"][k]) for k in ("total", "passed", "failed", "errored", "skipped")]
+    if d["baseline"] is None:
+        compared, not_executed, regressions = "-", "-", "-"
+    elif d["comparable"]:
+        compared, not_executed = d["baseline"], str(d["not_executed"])
+        regressions = str(len(d["classes"]["proxy_regression"]))
+    else:
+        compared, not_executed, regressions = f"{d['baseline']} (not comparable)", "-", "-"
+    return [leg, d["status"], compared, *counts, not_executed, regressions, fmt_duration(d["duration_s"])]
+
+
+def labels_text(labels):
+    return "; ".join(f"{lb['label']}: {lb['reason']}" for lb in labels) or "unexplained"
+
+
+def matched(s):
+    """Per issue (label, reason): the number of (leg, test) entries it labels in this suite."""
+    hits = {}
+    for leg, d in s["legs"].items():
+        entries = d["baseline_failures"] + [e for c in (d["classes"] or {}).values() for e in c]
+        for e in entries:
+            for lb in e["labels"]:
+                hits.setdefault((lb["label"], lb["reason"]), set()).add((leg, e["id"]))
+    return hits
+
+
+def suite_meta(s):
+    m = s["metadata"] or {}
+    version = (m.get("proxysql") or {}).get("version")
+    up = m.get("upstream") or {}
+    parts = [f"ProxySQL {version}"] if version else []
+    if up.get("ref"):
+        parts.append(f"upstream {up['ref']} ({(up.get('sha') or '')[:7]})")
+    return " · ".join(parts)
+
+
+def md(text):
+    """Text safe in a Markdown line or table cell."""
+    return html.escape(" ".join(str(text).split()), quote=False).replace("|", "\\|")
+
+
+def render_md(report):
+    out = ["# PostgreSQL 3rd-party tests: report", ""]
+    out.append("**Result: red**" if report["red"] else "**Result: green**")
+    out += [""] + [f"- {md(p)}" for p in report["problems"]] + ([""] if report["problems"] else [])
+    out += ["No comparison with earlier runs yet.", ""]
+    for suite, s in report["suites"].items():
+        out += [f"## {md(suite)}", ""]
+        if suite_meta(s):
+            out += [md(suite_meta(s)), ""]
+        if s["problem"]:
+            out += [md(f"{suite}: {s['problem']}"), ""]
+        if not s["legs"]:
+            continue
+        out += ["| Leg | Status | Compared with | Total | Passed | Failed | Errored | Skipped | Not executed | Regressions | Duration |",
+                "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+        out += ["| " + " | ".join(md(c) for c in leg_cells(leg, d)) + " |" for leg, d in s["legs"].items()]
+        out.append("")
+        out += [f"{md(leg)}: {d['files_unreadable']} JUnit files could not be read."
+                for leg, d in s["legs"].items() if d["files_unreadable"]]
+        for leg, d in s["legs"].items():
+            if not d["comparable"]:
+                continue
+            n = len(d["classes"]["proxy_regression"])
+            out += ["", f"### {md(leg)}: {n} tests pass directly but not through ProxySQL", ""]
+            rows = class_rows(d)
+            if rows:
+                out += ["| Class | Failed | Errored | Not executed | Labels |", "|---|---:|---:|---:|---|"]
+                out += [f"| {md(c)} | {f} | {e} | {ne} | " + md(", ".join(f"{k} ({v})" for k, v in sorted(lbs.items()))) + " |"
+                        for c, f, e, ne, lbs, _ in rows]
+                out.append("")
+            if not_reached(d):
+                out += [f"Not reached before the time limit: {not_reached(d)}", ""]
+            out.append(other_counts(d))
+        out += ["", "### Direct baseline failures", ""]
+        lines = [f"- {md(leg)}: {md(e['id'])} ({e['outcome']}): {md(labels_text(e['labels']))}"
+                 for leg, d in s["legs"].items() for e in d["baseline_failures"]]
+        out += (lines or ["None."]) + [""]
+        if s["issues"]:
+            hits = matched(s)
+            out += ["### Known issues", "", "| Label | Reason | Link | Tests matched |", "|---|---|---|---:|"]
+            out += [f"| {md(i['label'])} | {md(i['reason'])} | {md(i.get('link', ''))} | "
+                    f"{len(hits.get((i['label'], i['reason']), ()))} |" for i in s["issues"]]
+            out.append("")
+    return "\n".join(out) + "\n"
+
+
+def h(text):
+    return html.escape(str(text))
+
+
+def entry_items(entries):
+    return "".join(f"<li><code>{h(e['id'])}</code> {h(e['outcome'])}"
+                   + (f": {h(e['message'])}" if e.get("message") else "")
+                   + f" <em>{h(labels_text(e['labels']))}</em></li>" for e in entries)
+
+
+def details(title, entries):
+    return f"<details><summary>{h(title)} ({len(entries)})</summary><ul>{entry_items(entries)}</ul></details>" if entries else ""
+
+
+STYLE = """body{font:14px/1.45 system-ui,sans-serif;margin:1.5em auto;max-width:1200px;padding:0 16px;color:#1a1a1a;background:#fff}
+table{border-collapse:collapse;margin:.5em 0}th,td{border:1px solid #ccc;padding:3px 8px;text-align:left;vertical-align:top}
+td.n{text-align:right}.red{color:#fff;background:#b3261e;padding:4px 10px}.green{color:#fff;background:#1e6b2e;padding:4px 10px}
+code{font-size:12px}em{color:#555}details{margin:.2em 0}
+@media (prefers-color-scheme:dark){body{color:#e6e6e6;background:#161616}th,td{border-color:#444}em{color:#aaa}}"""
+
+
+def render_html(report):
+    out = ["<!doctype html>", '<html lang="en"><head><meta charset="utf-8">',
+           '<meta name="viewport" content="width=device-width, initial-scale=1">',
+           "<title>PostgreSQL 3rd-party tests</title>", f"<style>{STYLE}</style></head><body>",
+           "<h1>PostgreSQL 3rd-party tests: report</h1>",
+           f'<p><span class="{"red" if report["red"] else "green"}">Result: {"red" if report["red"] else "green"}</span></p>']
+    if report["problems"]:
+        out.append("<ul>" + "".join(f"<li>{h(p)}</li>" for p in report["problems"]) + "</ul>")
+    out.append("<p>No comparison with earlier runs yet.</p>")
+    head = ("Leg", "Status", "Compared with", "Total", "Passed", "Failed", "Errored", "Skipped",
+            "Not executed", "Regressions", "Duration")
+    for suite, s in report["suites"].items():
+        out.append(f"<h2>{h(suite)}</h2>")
+        if suite_meta(s):
+            out.append(f"<p>{h(suite_meta(s))}</p>")
+        if s["problem"]:
+            out.append(f"<p>{h(suite)}: {h(s['problem'])}</p>")
+        if not s["legs"]:
+            continue
+        out.append("<table><tr>" + "".join(f"<th>{c}</th>" for c in head) + "</tr>")
+        out += ["<tr>" + "".join(f'<td{" class=n" if i >= 3 else ""}>{h(c)}</td>' for i, c in enumerate(leg_cells(leg, d)))
+                + "</tr>" for leg, d in s["legs"].items()]
+        out.append("</table>")
+        out += [f"<p>{h(leg)}: {d['files_unreadable']} JUnit files could not be read.</p>"
+                for leg, d in s["legs"].items() if d["files_unreadable"]]
+        for leg, d in s["legs"].items():
+            if not d["comparable"]:
+                continue
+            c = d["classes"]
+            out.append(f"<h3>{h(leg)}: {len(c['proxy_regression'])} tests pass directly but not through ProxySQL</h3>")
+            rows = class_rows(d)
+            if rows:
+                out.append("<table><tr><th>Class</th><th>Failed</th><th>Errored</th><th>Not executed</th><th>Labels</th></tr>")
+                out += [f"<tr><td>{details(cls, entries) or h(cls)}</td><td class=n>{f}</td><td class=n>{e}</td>"
+                        f"<td class=n>{ne}</td><td>{h(', '.join(f'{k} ({v})' for k, v in sorted(lbs.items())))}</td></tr>"
+                        for cls, f, e, ne, lbs, entries in rows]
+                out.append("</table>")
+            if not_reached(d):
+                out.append(f"<p>Not reached before the time limit: {not_reached(d)}</p>")
+            out.append(f"<p>{h(other_counts(d))}</p>")
+            out.append(details("Fails both ways", c["both_fail"]) + details("Passes only through ProxySQL", c["proxy_only_pass"])
+                       + details("Skipped in one leg only", c["skip_mismatch"])
+                       + details("Only in this leg, not passed", [e for e in c["leg_only"] if e["outcome"] != "passed"]))
+        out.append("<h3>Direct baseline failures</h3>")
+        items = "".join(f"<li>{h(leg)}: <code>{h(e['id'])}</code> ({h(e['outcome'])}): {h(e['message'])} "
+                        f"<em>{h(labels_text(e['labels']))}</em></li>"
+                        for leg, d in s["legs"].items() for e in d["baseline_failures"])
+        out.append(f"<ul>{items}</ul>" if items else "<p>None.</p>")
+        if s["issues"]:
+            hits = matched(s)
+            out.append("<h3>Known issues</h3><table><tr><th>Label</th><th>Reason</th><th>Link</th><th>Tests matched</th></tr>")
+            out += [f"<tr><td>{h(i['label'])}</td><td>{h(i['reason'])}</td><td>"
+                    + (f'<a href="{h(i["link"])}">{h(i["link"])}</a>' if i.get("link") else "")
+                    + f"</td><td class=n>{len(hits.get((i['label'], i['reason']), ()))}</td></tr>" for i in s["issues"]]
+            out.append("</table>")
+    out.append("</body></html>")
+    return "\n".join(out) + "\n"
+
+
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -224,8 +457,14 @@ def main(argv):
     except ValueError as e:
         print(f"::error::{e}", file=sys.stderr)
         return 2
+    report["problems"] = problems(report)
+    report["red"] = bool(report["problems"])
     write_json(out_dir / "comparison.json", report)
-    return 0
+    (out_dir / "report.md").write_text(render_md(report), encoding="utf-8")
+    (out_dir / "report.html").write_text(render_html(report), encoding="utf-8")
+    for problem in report["problems"]:
+        print(f"::error::{problem}", file=sys.stderr)
+    return 1 if report["red"] else 0
 
 
 if __name__ == "__main__":

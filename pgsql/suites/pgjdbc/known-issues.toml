@@ -27,8 +27,12 @@ tests = [
     "org.postgresql.jdbc.ScramTest::*",
     "org.postgresql.test.util.PasswordUtilTest::*",
     "org.postgresql.test.core.RequireAuthTest::*",
-    "org.postgresql.test.plugin.AuthenticationPluginTest::*",
 ]
+
+[[issue]]
+label = "config"
+reason = "Expects an MD5 challenge; ProxySQL's default pgsql-authentication_method=3 sends SCRAM to every client"
+tests = ["org.postgresql.test.plugin.AuthenticationPluginTest::authPluginMD5()"]
 
 # SslTest's cases are all named run(); only the failure message tells which rule a case checks
 [[issue]]

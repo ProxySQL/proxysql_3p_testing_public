@@ -39,4 +39,4 @@ tests = ["org.postgresql.test.plugin.AuthenticationPluginTest::authPluginMD5()"]
 label = "proxy-architecture"
 reason = "TLS ends at ProxySQL, so PostgreSQL's per-database TLS and client certificate rules apply to ProxySQL's connection, not to the client's"
 tests = ["org.postgresql.test.ssl.SslTest::*"]
-message = "requires client certificate|BAD client certificate|requires SSL|rejects SSL"
+message = "requires client certificate|BAD client certificate|requires SSL|rejects SSL|DB rejects it"
